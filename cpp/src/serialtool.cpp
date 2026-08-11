@@ -2050,7 +2050,13 @@ void SerialTool::openGithub() {
 // ================= 配置 =================
 
 QString SerialTool::configPath() const {
-    return QCoreApplication::applicationDirPath() + QStringLiteral("/sscom_config.json");
+    // 配置文件跟随 exe 名：实时解析当前 exe 的真实文件名（不含扩展名），
+    // 获取失败时回退到 "SuperCOM"，保证任何情况下都有确定的配置文件。
+    QString name = QFileInfo(QCoreApplication::applicationFilePath()).completeBaseName();
+    if (name.isEmpty())
+        name = QStringLiteral("SuperCOM");
+    return QCoreApplication::applicationDirPath() + QStringLiteral("/")
+           + name + QStringLiteral("_config.json");
 }
 
 QJsonArray SerialTool::msEntriesToData() const {

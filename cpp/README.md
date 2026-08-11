@@ -63,12 +63,13 @@ cpp/
 | 双主题（Catppuccin） | 一致（QSS 模板与 Python 版逐条对应） |
 | 无边框窗口 + DWM 阴影/圆角 | 一致（FramelessWindowHint + DwmExtendFrameIntoClientArea） |
 | GitHub 更新检查 + 分块下载 | 一致（QNetworkAccessManager + QThreadPool Range 分块） |
-| sscom_config.json 配置持久化 | 一致（字段名完全兼容，可直接复用旧配置） |
+| `<exe名>_config.json` 配置持久化 | 一致（文件名跟随 exe，字段名完全兼容，可直接复用旧配置） |
 | 自动更新替换重启（bat） | 一致（UTF-8 BOM 脚本 + cmd 静默执行） |
 
 ## 说明
 
-- 配置保存位置：与 Python 版相同，`sscom_config.json` 放在**可执行文件所在目录**，
+- 配置保存位置：与 Python 版相同，放在**可执行文件所在目录**，文件名实时跟随 exe 名
+  （如 `SuperCOM.exe` → `SuperCOM_config.json`；取不到 exe 名时回退 `SuperCOM_config.json`），
   字段名与原版一致，可直接继承已保存的配置。
 
 ## 静态单文件构建（零依赖 exe）
