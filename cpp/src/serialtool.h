@@ -119,6 +119,10 @@ private:
     QString accentHex() const;
     void applyHighlight();
     void onSearchChange();
+    void searchJump(int delta);          // 跳转到上一个/下一个匹配（+1 下一个 / -1 上一个）
+    void updateSearchCountLabel();       // 刷新匹配计数标签与箭头可用状态
+    void toggleSearchBar();              // Ctrl+F：显示/隐藏接收区右上角搜索条
+    void hideSearchBar();                // 关闭搜索条并清空搜索状态
     void onRecvScroll(int value);
     void drainRx();
     void flushRxPacket();   // 按读超时空闲分包：把待分包缓存作为一条 rx 记录送出
@@ -213,7 +217,12 @@ private:
     ThemeCheckBox* m_chkPause = nullptr;
     ThemeCheckBox* m_chkFilter = nullptr;
     StyledComboBox* m_cmbEncoding = nullptr;
+    QWidget* m_searchBar = nullptr;         // 接收区右上角悬浮搜索条（默认隐藏）
     QLineEdit* m_entrySearch = nullptr;
+    QLabel* m_lblSearchCount = nullptr;   // 搜索匹配计数 "x/y"
+    QPushButton* m_btnSearchPrev = nullptr;  // 上一个匹配
+    QPushButton* m_btnSearchNext = nullptr;  // 下一个匹配
+    QPushButton* m_btnSearchClose = nullptr; // 关闭搜索条
 
     PortComboBox* m_cmbPort = nullptr;
     StyledComboBox* m_cmbBaud = nullptr;
@@ -278,6 +287,8 @@ private:
     bool m_sendHexPrev = false;
     QTimer* m_csPreviewTimer = nullptr;
     QTimer* m_searchTimer = nullptr;
+    QVector<int> m_searchHits;          // 搜索匹配位置（字符偏移），配合计数/跳转
+    int m_searchIndex = -1;             // 当前选中匹配下标（-1 未定位）
     QTimer* m_flushTimer = nullptr;
     QTimer* m_timerSend = nullptr;
     QTimer* m_msLoopTimer = nullptr;

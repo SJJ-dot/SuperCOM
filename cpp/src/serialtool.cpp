@@ -23,6 +23,7 @@
 #include <QFrame>
 #include <QProgressBar>
 #include <QToolButton>
+#include <QShortcut>
 #include <QScrollBar>
 #include <QMenu>
 #include <QTextCursor>
@@ -324,7 +325,7 @@ void SerialTool::buildUi() {
 
     // 左侧：接收区
     auto* recvBox = new QGroupBox(QString(), upper);
-    auto* recvLay = new QVBoxLayout(recvBox);
+    auto* recvLay = new QGridLayout(recvBox);
     recvLay->setContentsMargins(8, 6, 8, 6);
     recvLay->setSpacing(2);
     m_txtRecv = new QTextEdit(recvBox);
@@ -332,8 +333,61 @@ void SerialTool::buildUi() {
     QFont mono(QStringLiteral("Consolas"), 10);
     m_txtRecv->setFont(mono);
     m_txtRecv->setLineWrapMode(QTextEdit::WidgetWidth);
-    recvLay->addWidget(m_txtRecv, 1);
+    recvLay->addWidget(m_txtRecv, 0, 0);
     upperRow->addWidget(recvBox, 1);
+
+    // 接收区右上角悬浮搜索条（默认隐藏；焦点在接收区时 Ctrl+F 唤出）
+    m_searchBar = new QWidget(recvBox);
+    m_searchBar->setObjectName(QStringLiteral("searchBar"));
+    m_searchBar->setAttribute(Qt::WA_StyledBackground, true);
+    auto* sbLay = new QHBoxLayout(m_searchBar);
+    sbLay->setContentsMargins(8, 4, 8, 4);
+    sbLay->setSpacing(4);
+    m_entrySearch = new QLineEdit(m_searchBar);
+    m_entrySearch->setPlaceholderText(QStringLiteral("查找..."));
+    m_entrySearch->setFixedWidth(150);
+    connect(m_entrySearch, &QLineEdit::textChanged, this, &SerialTool::onSearchChange);
+    sbLay->addWidget(m_entrySearch);
+    m_lblSearchCount = new QLabel(QStringLiteral("0/0"), m_searchBar);
+    m_lblSearchCount->setAlignment(Qt::AlignCenter);
+    m_lblSearchCount->setMinimumWidth(40);
+    sbLay->addWidget(m_lblSearchCount);
+    m_btnSearchPrev = new QPushButton(QStringLiteral("▲"), m_searchBar);
+    m_btnSearchPrev->setToolTip(QStringLiteral("上一个匹配"));
+    m_btnSearchPrev->setFixedSize(22, 22);
+    m_btnSearchPrev->setCursor(Qt::PointingHandCursor);
+    connect(m_btnSearchPrev, &QPushButton::clicked, this, [this] { searchJump(-1); });
+    sbLay->addWidget(m_btnSearchPrev);
+    m_btnSearchNext = new QPushButton(QStringLiteral("▼"), m_searchBar);
+    m_btnSearchNext->setToolTip(QStringLiteral("下一个匹配"));
+    m_btnSearchNext->setFixedSize(22, 22);
+    m_btnSearchNext->setCursor(Qt::PointingHandCursor);
+    connect(m_btnSearchNext, &QPushButton::clicked, this, [this] { searchJump(1); });
+    sbLay->addWidget(m_btnSearchNext);
+    m_chkFilter = new ThemeCheckBox(QStringLiteral("筛选"), m_searchBar);
+    connect(m_chkFilter, &QCheckBox::stateChanged, this, &SerialTool::refreshView);
+    sbLay->addWidget(m_chkFilter);
+    m_btnSearchClose = new QPushButton(QStringLiteral("✕"), m_searchBar);
+    m_btnSearchClose->setToolTip(QStringLiteral("关闭搜索 (Esc)"));
+    m_btnSearchClose->setFixedSize(22, 22);
+    m_btnSearchClose->setCursor(Qt::PointingHandCursor);
+    connect(m_btnSearchClose, &QPushButton::clicked, this, &SerialTool::hideSearchBar);
+    sbLay->addWidget(m_btnSearchClose);
+    // 悬浮于接收区右上角；后 add 的在 QGridLayout 同格中位于上层
+    recvLay->addWidget(m_searchBar, 0, 0, Qt::AlignTop | Qt::AlignRight);
+    m_searchBar->hide();
+    // Ctrl+F：焦点在接收区时唤出搜索条（再按一次关闭）
+    auto* scFind = new QShortcut(QKeySequence::Find, m_txtRecv);
+    scFind->setContext(Qt::WidgetShortcut);
+    connect(scFind, &QShortcut::activated, this, &SerialTool::toggleSearchBar);
+    // 焦点在搜索条内时 Ctrl+F 同样可关闭
+    auto* scFindBar = new QShortcut(QKeySequence::Find, m_searchBar);
+    scFindBar->setContext(Qt::WidgetShortcut);
+    connect(scFindBar, &QShortcut::activated, this, &SerialTool::toggleSearchBar);
+    // Esc 关闭搜索条
+    auto* scEsc = new QShortcut(QKeySequence(Qt::Key_Escape), m_searchBar);
+    scEsc->setContext(Qt::WidgetShortcut);
+    connect(scEsc, &QShortcut::activated, this, &SerialTool::hideSearchBar);
 
     // 右侧：历史/快捷命令（默认隐藏，固定宽 420）
     m_msTabs = new QTabWidget(upper);
@@ -366,14 +420,6 @@ void SerialTool::buildUi() {
     m_cmbEncoding->setFixedWidth(90);
     connect(m_cmbEncoding, &QComboBox::currentTextChanged, this, &SerialTool::refreshView);
     rt->addWidget(m_cmbEncoding);
-    rt->addWidget(new QLabel(QStringLiteral("搜索:"), upper));
-    m_entrySearch = new QLineEdit(upper);
-    m_entrySearch->setMaximumWidth(180);
-    connect(m_entrySearch, &QLineEdit::textChanged, this, &SerialTool::onSearchChange);
-    rt->addWidget(m_entrySearch);
-    m_chkFilter = new ThemeCheckBox(QStringLiteral("筛选"), upper);
-    connect(m_chkFilter, &QCheckBox::stateChanged, this, &SerialTool::refreshView);
-    rt->addWidget(m_chkFilter);
     btn = new QPushButton(QStringLiteral("保存数据"), upper);
     connect(btn, &QPushButton::clicked, this, &SerialTool::saveRecv);
     rt->addWidget(btn);
@@ -664,6 +710,15 @@ void SerialTool::applyTheme(const QString& themeName) {
     m_lblCsResult->setStyleSheet(
         QStringLiteral("color:%1;font-weight:bold;")
             .arg(m_themeC.value(QStringLiteral("err_color"))));
+    if (m_lblSearchCount)
+        m_lblSearchCount->setStyleSheet(
+            QStringLiteral("color:%1;").arg(m_themeC.value(QStringLiteral("text_secondary"))));
+    if (m_searchBar)
+        m_searchBar->setStyleSheet(
+            QStringLiteral("QWidget#searchBar{background-color:%1;border:1px solid %2;"
+                           "border-radius:6px;}")
+            .arg(m_themeC.value(QStringLiteral("panel_bg")))
+            .arg(m_themeC.value(QStringLiteral("panel_border"))));
     m_lblApp->setText(
         QStringLiteral("<a href=\"github\" style=\"color:%1;\">SuperCOM</a>")
             .arg(m_themeC.value(QStringLiteral("link_color"))));
@@ -1430,28 +1485,121 @@ QString SerialTool::accentHex() const {
 
 void SerialTool::applyHighlight() {
     const QString needle = m_entrySearch->text();
+    m_searchHits.clear();
     QList<QTextEdit::ExtraSelection> sels;
     if (!needle.isEmpty()) {
+        // 普通匹配：黄色底黑字
         QTextCharFormat fmt;
         fmt.setBackground(QColor(QStringLiteral("#ffe066")));
         fmt.setForeground(QColor(QStringLiteral("#000000")));
+        // 当前选中匹配：橙色底黑字
+        QTextCharFormat curFmt;
+        curFmt.setBackground(QColor(QStringLiteral("#fe640b")));
+        curFmt.setForeground(QColor(QStringLiteral("#ffffff")));
         QTextDocument* doc = m_txtRecv->document();
         QTextCursor cursor(doc);
+        int idx = 0;
         while (true) {
             cursor = doc->find(needle, cursor);
             if (cursor.isNull())
                 break;
+            m_searchHits.append(cursor.selectionStart());
             QTextEdit::ExtraSelection sel;
-            sel.format = fmt;
+            sel.format = (idx == m_searchIndex) ? curFmt : fmt;
             sel.cursor = cursor;
             sels.append(sel);
+            ++idx;
         }
+        // 索引越界保护（文本追加/裁剪后位置失效时重置）
+        if (m_searchIndex >= m_searchHits.size() || m_searchIndex < 0)
+            m_searchIndex = -1;
+    } else {
+        m_searchIndex = -1;
     }
     m_txtRecv->setExtraSelections(sels);
+    updateSearchCountLabel();
+}
+
+void SerialTool::updateSearchCountLabel() {
+    if (!m_lblSearchCount)
+        return;
+    const QString needle = m_entrySearch->text();
+    const int total = m_searchHits.size();
+    if (needle.isEmpty() || total == 0) {
+        m_lblSearchCount->setText(QStringLiteral("0/0"));
+    } else if (m_searchIndex < 0) {
+        // 尚未跳转：只显示总数（引导点击箭头）
+        m_lblSearchCount->setText(QStringLiteral("%1/%1").arg(total));
+    } else {
+        m_lblSearchCount->setText(QStringLiteral("%1/%2").arg(m_searchIndex + 1).arg(total));
+    }
+    m_btnSearchPrev->setEnabled(!needle.isEmpty() && total > 0);
+    m_btnSearchNext->setEnabled(!needle.isEmpty() && total > 0);
+}
+
+void SerialTool::searchJump(int delta) {
+    if (m_searchHits.isEmpty())
+        return;
+    const int total = m_searchHits.size();
+    int idx;
+    if (m_searchIndex < 0) {
+        // 未定位：向下从第一个开始，向上从最后一个开始
+        idx = (delta > 0) ? 0 : total - 1;
+    } else {
+        idx = (m_searchIndex + delta + total) % total;
+    }
+    m_searchIndex = idx;
+    // 跳转并滚动到匹配位置
+    QTextCursor cursor(m_txtRecv->document());
+    cursor.setPosition(m_searchHits[idx]);
+    cursor.setPosition(m_searchHits[idx] + m_entrySearch->text().length(),
+                       QTextCursor::KeepAnchor);
+    m_txtRecv->setTextCursor(cursor);
+    m_txtRecv->ensureCursorVisible();
+    applyHighlight();   // 刷新当前匹配高亮与计数
+}
+
+void SerialTool::toggleSearchBar() {
+    if (!m_searchBar)
+        return;
+    if (m_searchBar->isVisible()) {
+        hideSearchBar();
+        return;
+    }
+    m_searchBar->show();
+    m_searchBar->raise();
+    // 接收区有选中文字 → 自动填入搜索框（立即触发搜索）
+    QString sel = m_txtRecv->textCursor().selectedText();
+    sel.replace(QChar(0x2029), QLatin1Char('\n'));   // 段落分隔符→换行
+    sel.replace(QChar(0x2028), QLatin1Char('\n'));   // 行分隔符→换行
+    sel = sel.trimmed();
+    if (!sel.isEmpty() && sel != m_entrySearch->text()) {
+        m_entrySearch->setText(sel);
+        m_searchIndex = -1;
+        refreshView();   // 立即按新词高亮，不等 200ms 防抖
+    }
+    m_entrySearch->setFocus();
+    m_entrySearch->selectAll();   // 便于直接输入新词覆盖
+}
+
+void SerialTool::hideSearchBar() {
+    if (!m_searchBar || !m_searchBar->isVisible())
+        return;
+    m_searchBar->hide();
+    // 清空搜索状态：移除高亮、复位计数，避免残留遮住接收区
+    m_searchHits.clear();
+    m_searchIndex = -1;
+    m_txtRecv->setExtraSelections(QList<QTextEdit::ExtraSelection>());
+    m_entrySearch->blockSignals(true);
+    m_entrySearch->clear();
+    m_entrySearch->blockSignals(false);
+    updateSearchCountLabel();
+    m_txtRecv->setFocus();
 }
 
 void SerialTool::onSearchChange() {
     // 防抖：停止输入 200ms 后再刷新
+    m_searchIndex = -1;   // 搜索词变化，定位索引复位
     if (m_searchTimer)
         m_searchTimer->stop();
     m_searchTimer = new QTimer(this);
@@ -1512,6 +1660,9 @@ void SerialTool::clearRecv() {
     m_pktStartTs.clear();
     if (m_pktTimer)
         m_pktTimer->stop();
+    m_searchHits.clear();      // 文本已清空，搜索定位/计数一并复位
+    m_searchIndex = -1;
+    updateSearchCountLabel();
 }
 
 void SerialTool::saveRecv() {
