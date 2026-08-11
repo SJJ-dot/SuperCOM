@@ -105,6 +105,11 @@ SerialTool::SerialTool(QWidget* parent) : QWidget(parent) {
     m_flushTimer = new QTimer(this);
     connect(m_flushTimer, &QTimer::timeout, this, &SerialTool::drainRx);
     m_flushTimer->start(50);
+
+    // 按读超时空闲分包：数据流停顿超过 m_readTimeout 即把缓存作为一条显示
+    m_pktTimer = new QTimer(this);
+    m_pktTimer->setSingleShot(true);
+    connect(m_pktTimer, &QTimer::timeout, this, &SerialTool::flushRxPacket);
 }
 
 // ================= 事件（缩放 / DWM / 背景 / 关闭） =================
@@ -1041,6 +1046,9 @@ void SerialTool::showSettingsDialog() {
     form->addRow(QStringLiteral("流控:"), cmbFlow);
 
     auto* entryTimeout = new QLineEdit(m_readTimeout, dlg);
+    entryTimeout->setToolTip(QStringLiteral(
+        "接收空闲超时(ms)：数据流停顿超过该时间后，把缓存数据作为一条显示。\n"
+        "值越小实时性越高，值越大越容易把断续的一帧数据归并为一条。"));
     form->addRow(QStringLiteral("读超时(ms):"), entryTimeout);
 
     auto* btns = new QHBoxLayout;
@@ -1164,6 +1172,10 @@ void SerialTool::openPort() {
     connect(ser, &QSerialPort::errorOccurred, this, &SerialTool::onSerialError);
     m_ser = ser;
     ++m_rxEpoch;
+    // 打开新串口前清掉待分包缓存，避免上个会话残留数据冒出
+    m_rxBuf.clear();
+    m_pktStartTs.clear();
+    m_pktTimer->stop();
     m_btnOpen->setText(QStringLiteral("关闭串口"));
     refreshStatus();
     addRecord(QStringLiteral("sys"),
@@ -1183,6 +1195,8 @@ void SerialTool::closePort() {
     ++m_rxEpoch;
     // 丢弃尚未刷新的接收/发送事件缓冲
     m_pendingEvents.clear();
+    // 关闭串口前把待分包缓存作为一条送出（避免最后一段数据丢失）
+    flushRxPacket();
     m_btnOpen->setText(QStringLiteral("打开串口"));
     refreshStatus();
     addRecord(QStringLiteral("sys"), QStringLiteral("串口已关闭"));
@@ -1191,11 +1205,28 @@ void SerialTool::closePort() {
 void SerialTool::onSerialData() {
     const QByteArray data = m_ser->readAll();
     m_rxBytes += quint64(data.size());
-    // 时间戳在数据到达时刻生成（而非显示时刻）
+    if (data.isEmpty())
+        return;
+    // 按"读超时"空闲分包：字节先攒进缓存，数据流停顿超过 m_readTimeout 才作为一条
+    if (m_rxBuf.isEmpty())
+        m_pktStartTs = sjj::nowTimestamp();   // 包首字节到达时刻作该条时间戳
+    m_rxBuf += data;
+    m_pktTimer->start(qMax(1, m_readTimeout.toInt()));   // 有数据就重置空闲计时
+    // 防内存撑爆：缓存达到上限立即强制分包（即使数据流未停顿）
+    if (m_rxBuf.size() >= MAX_RX_BUF)
+        flushRxPacket();
+}
+
+void SerialTool::flushRxPacket() {
+    m_pktTimer->stop();
+    if (m_rxBuf.isEmpty())
+        return;
     Record r;
     r.kind = QStringLiteral("rx");
-    r.rawBytes = data;
-    r.ts = sjj::nowTimestamp();
+    r.rawBytes = m_rxBuf;
+    r.ts = m_pktStartTs;
+    m_rxBuf.clear();
+    m_pktStartTs.clear();
     m_pendingEvents.append(r);
     if (m_pendingEvents.size() > sjj::MAX_RECORDS)
         m_pendingEvents = m_pendingEvents.mid(m_pendingEvents.size() - sjj::MAX_RECORDS);
@@ -1476,6 +1507,11 @@ void SerialTool::clearRecv() {
     m_txtRecv->clear();
     m_records.clear();
     m_pendingEvents.clear();   // 丢弃队列中尚未刷新的事件（否则清空后残留又会显示）
+    // 清屏语义：待分包缓存一并丢弃，避免超时后残留数据又冒出来
+    m_rxBuf.clear();
+    m_pktStartTs.clear();
+    if (m_pktTimer)
+        m_pktTimer->stop();
 }
 
 void SerialTool::saveRecv() {

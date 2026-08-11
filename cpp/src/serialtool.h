@@ -121,6 +121,7 @@ private:
     void onSearchChange();
     void onRecvScroll(int value);
     void drainRx();
+    void flushRxPacket();   // 按读超时空闲分包：把待分包缓存作为一条 rx 记录送出
     void clearRecv();
     void saveRecv();
 
@@ -298,7 +299,14 @@ private:
     QString m_stopbits = QStringLiteral("1");
     QString m_parity = QStringLiteral("None");
     QString m_flow = QStringLiteral("None");
-    QString m_readTimeout = QStringLiteral("50");
+    QString m_readTimeout = QStringLiteral("50");   // 读超时(ms)：接收空闲超时分包阈值
+
+    // 按读超时空闲分包状态：字节先攒进缓存，数据流停顿超过 m_readTimeout 才作为一条
+    // （防内存撑爆：缓存达到 MAX_RX_BUF 立即强制分包，无论是否空闲）
+    QByteArray m_rxBuf;
+    QString m_pktStartTs;                 // 当前包首字节到达时刻（作该条时间戳）
+    QTimer* m_pktTimer = nullptr;         // 分包空闲定时器（singleShot）
+    static constexpr qsizetype MAX_RX_BUF = 512 * 1024;
 
     // 无边框缩放
     int m_resizeMargin = 8;
