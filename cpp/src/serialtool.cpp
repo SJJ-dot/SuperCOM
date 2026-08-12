@@ -198,6 +198,10 @@ bool SerialTool::eventFilter(QObject* obj, QEvent* event) {
         w->installEventFilter(this);
     }
     const QEvent::Type t = event->type();
+    if (obj == m_recvBox && t == QEvent::Resize) {
+        positionScrollBottomBtn();
+        return QWidget::eventFilter(obj, event);
+    }
     if (t == QEvent::MouseMove || t == QEvent::MouseButtonPress
         || t == QEvent::MouseButtonRelease) {
         auto* me = static_cast<QMouseEvent*>(event);
@@ -325,6 +329,7 @@ void SerialTool::buildUi() {
 
     // 左侧：接收区
     auto* recvBox = new QGroupBox(QString(), upper);
+    m_recvBox = recvBox;
     auto* recvLay = new QGridLayout(recvBox);
     recvLay->setContentsMargins(8, 6, 8, 6);
     recvLay->setSpacing(2);
@@ -335,6 +340,13 @@ void SerialTool::buildUi() {
     m_txtRecv->setLineWrapMode(QTextEdit::WidgetWidth);
     recvLay->addWidget(m_txtRecv, 0, 0);
     upperRow->addWidget(recvBox, 1);
+
+    // 接收区右下角悬浮按钮：滚动离开底部（自动暂停刷新）时出现，点击一键回到底部并恢复刷新
+    m_btnScrollBottom = new QPushButton(QStringLiteral("↓"), recvBox);
+    m_btnScrollBottom->setToolTip(QStringLiteral("滚动到底部并恢复刷新"));
+    m_btnScrollBottom->setFixedSize(30, 24);
+    m_btnScrollBottom->hide();
+    connect(m_btnScrollBottom, &QPushButton::clicked, this, &SerialTool::scrollRecvToBottom);
 
     // 接收区右上角悬浮搜索条（默认隐藏；焦点在接收区时 Ctrl+F 唤出）
     m_searchBar = new QWidget(recvBox);
@@ -1434,6 +1446,11 @@ void SerialTool::appendToView(QVector<Record>& recs) {
         applyHighlight();
     if (!m_chkPause->isChecked())
         m_txtRecv->verticalScrollBar()->setValue(m_txtRecv->verticalScrollBar()->maximum());
+    else if (m_btnScrollBottom && !m_btnScrollBottom->isVisible()) {
+        // 暂停刷新期间新数据积压：亮出"回到底部"按钮，随时一键恢复
+        positionScrollBottomBtn();
+        m_btnScrollBottom->show();
+    }
 }
 
 void SerialTool::deleteTopLines(int n) {
@@ -1477,6 +1494,11 @@ void SerialTool::refreshView() {
     applyHighlight();
     if (!m_chkPause->isChecked())
         m_txtRecv->verticalScrollBar()->setValue(m_txtRecv->verticalScrollBar()->maximum());
+    else if (m_btnScrollBottom && !m_btnScrollBottom->isVisible()) {
+        // 暂停刷新期间新数据积压：亮出"回到底部"按钮，随时一键恢复
+        positionScrollBottomBtn();
+        m_btnScrollBottom->show();
+    }
 }
 
 QString SerialTool::accentHex() const {
@@ -1613,7 +1635,41 @@ void SerialTool::onRecvScroll(int value) {
     if (m_programScroll)
         return;
     auto* sb = m_txtRecv->verticalScrollBar();
-    m_chkPause->setChecked(value < sb->maximum());
+    const bool atBottom = value >= sb->maximum();
+    m_chkPause->setChecked(!atBottom);
+    // 离开底部 → 显示"回到底部"悬浮按钮；滚回底部 → 隐藏
+    if (m_btnScrollBottom) {
+        if (atBottom) {
+            m_btnScrollBottom->hide();
+        } else {
+            positionScrollBottomBtn();
+            m_btnScrollBottom->show();
+        }
+    }
+}
+
+void SerialTool::scrollRecvToBottom() {
+    ScrollGuard guard(m_programScroll);   // 程序性滚动：不触发"自动勾选暂停刷新"
+    m_txtRecv->verticalScrollBar()->setValue(m_txtRecv->verticalScrollBar()->maximum());
+    m_chkPause->setChecked(false);        // 取消勾选"暂停刷新"，恢复自动滚动
+    if (m_btnScrollBottom)
+        m_btnScrollBottom->hide();
+}
+
+void SerialTool::positionScrollBottomBtn() {
+    if (!m_btnScrollBottom || !m_recvBox)
+        return;
+    auto* sb = m_txtRecv->verticalScrollBar();
+    int sbw = sb->isVisible() ? sb->width() : 0;
+    if (sbw <= 0)
+        sbw = sb->sizeHint().width();
+    if (sbw <= 0)
+        sbw = 16;   // 兜底：Windows 默认滚动条宽度
+    const int m = 4;
+    const QRect tr = m_txtRecv->geometry();
+    m_btnScrollBottom->move(tr.right() - sbw - m_btnScrollBottom->width() - m,
+                            tr.bottom() - m_btnScrollBottom->height() - m);
+    m_btnScrollBottom->raise();
 }
 
 void SerialTool::drainRx() {

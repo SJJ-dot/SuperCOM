@@ -29,6 +29,7 @@ class QProgressBar;
 class QToolButton;
 class QDialog;
 class QFrame;
+class QGroupBox;
 class QVBoxLayout;
 class QHBoxLayout;
 class QFileSystemWatcher;
@@ -124,6 +125,8 @@ private:
     void toggleSearchBar();              // Ctrl+F：显示/隐藏接收区右上角搜索条
     void hideSearchBar();                // 关闭搜索条并清空搜索状态
     void onRecvScroll(int value);
+    void scrollRecvToBottom();       // 一键回到底部并恢复刷新（右下角悬浮按钮）
+    void positionScrollBottomBtn();  // 把悬浮按钮定位到滚动条下方（跟随窗口缩放）
     void drainRx();
     void flushRxPacket();   // 按读超时空闲分包：把待分包缓存作为一条 rx 记录送出
     void clearRecv();
@@ -205,6 +208,8 @@ private:
     TitleBar* m_titleBar = nullptr;
 
     QTextEdit* m_txtRecv = nullptr;
+    QGroupBox* m_recvBox = nullptr;      // 接收区容器（滚动条下方悬浮按钮的定位基准）
+    QPushButton* m_btnScrollBottom = nullptr; // 接收区右下角"回到底部"悬浮按钮（离开底部时显示）
     QTabWidget* m_msTabs = nullptr;
     QListWidget* m_histList = nullptr;
     QScrollArea* m_msScroll = nullptr;
