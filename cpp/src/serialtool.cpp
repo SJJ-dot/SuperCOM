@@ -1397,19 +1397,30 @@ void SerialTool::addRecord(const QString& kind, const QString& raw) {
 
 void SerialTool::appendToView(QVector<Record>& recs) {
     ScrollGuard guard(m_programScroll);
-    // 超上限裁剪最旧（保持内存与视图一致）
-    if (m_records.size() > sjj::MAX_RECORDS) {
-        const int overflow = m_records.size() - sjj::MAX_RECORDS;
+    // 超上限裁剪最旧（保持内存与视图一致）：
+    // 条数上限 MAX_RECORDS + 文档总字符数上限 MAX_DOC_CHARS 双保险，
+    // 防止大包堆积让 QTextDocument 膨胀到拖慢布局/滚动/HEX 重建
+    if (m_records.size() > sjj::MAX_RECORDS ||
+        m_txtRecv->document()->characterCount() > sjj::MAX_DOC_CHARS) {
+        const int overflow = qMax(0, m_records.size() - sjj::MAX_RECORDS);
         const QVector<Record> removed = m_records.mid(0, overflow);
         m_records.remove(0, overflow);
+        int delLines = 0;
+        for (const auto& r : removed)
+            delLines += renderRecord(r).count(QLatin1Char('\n'));
+        // 字符数仍超限（大包场景）：继续丢最旧直到达标
+        while (m_txtRecv->document()->characterCount() > sjj::MAX_DOC_CHARS
+               && !m_records.isEmpty()) {
+            const Record r = m_records.first();
+            m_records.removeFirst();
+            delLines += renderRecord(r).count(QLatin1Char('\n'));
+        }
         if (m_chkFilter->isChecked()) {
             refreshView();
             return;
         }
-        int delLines = 0;
-        for (const auto& r : removed)
-            delLines += renderRecord(r).count(QLatin1Char('\n'));
-        deleteTopLines(delLines);
+        if (delLines > 0)
+            deleteTopLines(delLines);
     }
     const QString needle = m_entrySearch->text();
     if (m_chkFilter->isChecked() && !needle.isEmpty()) {
@@ -1425,6 +1436,8 @@ void SerialTool::appendToView(QVector<Record>& recs) {
     }
     QTextCursor cursor = m_txtRecv->textCursor();
     cursor.movePosition(QTextCursor::End);
+    // 批量插入：edit block 内所有 insertText 合并为一次文档重排/重绘
+    cursor.beginEditBlock();
     const QColor accent(m_themeC.value(QStringLiteral("accent")));
     const QColor editFg(m_themeC.value(QStringLiteral("edit_fg")));
     for (const auto& r : recs) {
@@ -1442,6 +1455,7 @@ void SerialTool::appendToView(QVector<Record>& recs) {
         cursor.insertText(parts.second);
         cursor.insertText(QStringLiteral("\n"));
     }
+    cursor.endEditBlock();
     if (!needle.isEmpty())
         applyHighlight();
     if (!m_chkPause->isChecked())
@@ -1455,12 +1469,14 @@ void SerialTool::appendToView(QVector<Record>& recs) {
 
 void SerialTool::deleteTopLines(int n) {
     QTextCursor cursor(m_txtRecv->document());
+    cursor.beginEditBlock();   // 合并多行删除为一次文档重排
     cursor.movePosition(QTextCursor::Start);
     for (int i = 0; i < n; ++i) {
         if (!cursor.movePosition(QTextCursor::Down, QTextCursor::KeepAnchor))
             break;
     }
     cursor.removeSelectedText();
+    cursor.endEditBlock();
 }
 
 void SerialTool::refreshView() {
@@ -1473,6 +1489,9 @@ void SerialTool::refreshView() {
     m_txtRecv->clear();
     QTextCursor cursor = m_txtRecv->textCursor();
     cursor.movePosition(QTextCursor::End);
+    // 全量重建：edit block 把上千次 insertText 合并为一次文档重排
+    // （HEX 显示切换/主题切换走这里，文档大时避免逐条插入卡死 UI）
+    cursor.beginEditBlock();
     for (const auto& r : m_records) {
         const QString rendered = renderRecord(r);
         if (filt && !needle.isEmpty() && !rendered.toLower().contains(needle.toLower()))
@@ -1490,6 +1509,7 @@ void SerialTool::refreshView() {
         cursor.setCharFormat(plain);
         cursor.insertText(parts.second + QStringLiteral("\n"));
     }
+    cursor.endEditBlock();
     m_txtRecv->blockSignals(false);
     applyHighlight();
     if (!m_chkPause->isChecked())

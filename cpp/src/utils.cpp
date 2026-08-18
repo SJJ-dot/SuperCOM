@@ -86,17 +86,22 @@ QByteArray encodeString(const QString& text, const QString& encoding) {
     return codec->fromUnicode(text);
 }
 
+namespace {
+// HEX 查表：避免逐字节 arg().toUpper() 的临时分配（大包数据可达数十万字节）
+const char kHexDigits[] = "0123456789ABCDEF";
+} // namespace
+
 QString hexBody(const QByteArray& data) {
     // HEX 显示紧凑一行，不再在 0x0A 前插入换行：
     // CR/LF (0D 0A) 是常见协议分隔字节，被拆开会破坏接收日志的可读性。
     QString text;
     text.reserve(data.size() * 3);
     for (qsizetype i = 0; i < data.size(); ++i) {
-        const uchar b = uchar(data.at(i));
-        const QString hex = QStringLiteral("%1").arg(int(b), 2, 16, QLatin1Char('0')).toUpper();
-        if (!text.isEmpty())
+        if (i > 0)
             text += QLatin1Char(' ');
-        text += hex;
+        const uchar b = uchar(data.at(i));
+        text += QLatin1Char(kHexDigits[b >> 4]);
+        text += QLatin1Char(kHexDigits[b & 0xF]);
     }
     return text;
 }
@@ -121,7 +126,9 @@ QString spacedHex(const QByteArray& data) {
     for (qsizetype i = 0; i < data.size(); ++i) {
         if (i > 0)
             out += QLatin1Char(' ');
-        out += QStringLiteral("%1").arg(uchar(data.at(i)), 2, 16, QLatin1Char('0')).toUpper();
+        const uchar b = uchar(data.at(i));
+        out += QLatin1Char(kHexDigits[b >> 4]);
+        out += QLatin1Char(kHexDigits[b & 0xF]);
     }
     return out;
 }

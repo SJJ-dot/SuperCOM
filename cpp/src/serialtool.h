@@ -322,7 +322,9 @@ private:
     QByteArray m_rxBuf;
     QString m_pktStartTs;                 // 当前包首字节到达时刻（作该条时间戳）
     QTimer* m_pktTimer = nullptr;         // 分包空闲定时器（singleShot）
-    static constexpr qsizetype MAX_RX_BUF = 512 * 1024;
+    // 分包上限 64KB：单条记录变小，50ms 刷入更均匀，
+    // 避免 512KB 大包一次插入 1.5MB HEX 文本把 UI 卡死
+    static constexpr qsizetype MAX_RX_BUF = 64 * 1024;
 
     // 无边框缩放
     int m_resizeMargin = 8;

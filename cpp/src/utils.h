@@ -16,6 +16,9 @@ namespace sjj {
 
 // ============ 常量 ============
 constexpr int MAX_RECORDS = 5000;          // 接收记录上限
+// 接收区 QTextDocument 总字符上限：防止大包堆积让文档膨胀到
+// 拖慢布局/滚动/HEX 重建（HEX 模式 4MB ≈ 约 130 万字节原始数据）
+constexpr int MAX_DOC_CHARS = 4 * 1024 * 1024;
 
 inline const QString APP_TITLE = QStringLiteral("SuperCOM");
 inline const QString GITHUB_URL = QStringLiteral("https://github.com/SJJ-dot/SuperCOM.git");
