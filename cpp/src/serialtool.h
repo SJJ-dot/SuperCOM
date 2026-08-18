@@ -284,6 +284,7 @@ private:
     QDialog* m_settingsWin = nullptr;
     bool m_suppressApply = false;    // 程序化修改串口参数时抑制"自动重开"
     bool m_programScroll = false;    // 程序性滚动期间抑制"自动勾选暂停刷新"
+    int m_lastScrollMax = 0;         // 上次 onRecvScroll 记录的滚动条最大值（识别 range 收缩 clamp）
     qint64 m_lastStatusTs = 0;
     QString m_lastSrText;
     QString m_lastHsText;

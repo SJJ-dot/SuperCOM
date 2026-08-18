@@ -425,6 +425,7 @@ void SerialTool::buildUi() {
     connect(m_chkShowTs, &QCheckBox::stateChanged, this, &SerialTool::refreshView);
     m_chkPause = new ThemeCheckBox(QStringLiteral("暂停刷新"), upper);
     rt->addWidget(m_chkPause);
+    // 暂停 = 不自动滚动：数据照常渲染，滚到底由 onRecvScroll 自动解除暂停
     rt->addWidget(new QLabel(QStringLiteral("编码:"), upper));
     m_cmbEncoding = new StyledComboBox(upper);
     m_cmbEncoding->addItems(sjj::ENCODINGS);
@@ -1397,6 +1398,9 @@ void SerialTool::addRecord(const QString& kind, const QString& raw) {
 
 void SerialTool::appendToView(QVector<Record>& recs) {
     ScrollGuard guard(m_programScroll);
+    // 暂停语义 = 不自动滚动：数据照常写入视图，滚动位置锁定不动。
+    // 用户手动向下滚动即可看到新数据；滚到最底部时 onRecvScroll 自动解除暂停。
+    // （裁剪删顶行引发的 range 收缩/clamp 由 onRecvScroll 的 range 检测过滤，不会误改暂停）
     // 超上限裁剪最旧（保持内存与视图一致）：
     // 条数上限 MAX_RECORDS + 文档总字符数上限 MAX_DOC_CHARS 双保险，
     // 防止大包堆积让 QTextDocument 膨胀到拖慢布局/滚动/HEX 重建
@@ -1651,11 +1655,21 @@ void SerialTool::onSearchChange() {
 }
 
 void SerialTool::onRecvScroll(int value) {
-    // 程序性滚动（搜索刷新/批量插入/清空）不勾选
-    if (m_programScroll)
-        return;
     auto* sb = m_txtRecv->verticalScrollBar();
-    const bool atBottom = value >= sb->maximum();
+    // 程序性滚动（搜索刷新/批量插入/清空）不勾选
+    if (m_programScroll) {
+        m_lastScrollMax = sb->maximum();
+        return;
+    }
+    const int maxv = sb->maximum();
+    // 仅 range 收缩（裁剪删顶行引发 value clamp）属于程序性变化，跳过联动；
+    // range 增长（数据追加）不影响用户滚动判断，保证暂停中手动滚到底能即时解除暂停
+    if (maxv < m_lastScrollMax) {
+        m_lastScrollMax = maxv;
+        return;
+    }
+    m_lastScrollMax = maxv;
+    const bool atBottom = value >= maxv;
     m_chkPause->setChecked(!atBottom);
     // 离开底部 → 显示"回到底部"悬浮按钮；滚回底部 → 隐藏
     if (m_btnScrollBottom) {
