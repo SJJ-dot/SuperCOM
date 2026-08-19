@@ -409,9 +409,10 @@ void SerialTool::buildUi() {
     auto* scFindBar = new QShortcut(QKeySequence::Find, m_searchBar);
     scFindBar->setContext(Qt::WidgetShortcut);
     connect(scFindBar, &QShortcut::activated, this, &SerialTool::toggleSearchBar);
-    // Esc 关闭搜索条（焦点在搜索条内 / 接收区内都生效）
+    // Esc 关闭搜索条（WidgetWithChildrenShortcut：焦点在搜索条本身或任一子控件
+    // —— 含输入框 m_entrySearch、上一/下一按钮、关闭按钮 —— 均生效）
     auto* scEsc = new QShortcut(QKeySequence(Qt::Key_Escape), m_searchBar);
-    scEsc->setContext(Qt::WidgetShortcut);
+    scEsc->setContext(Qt::WidgetWithChildrenShortcut);
     connect(scEsc, &QShortcut::activated, this, &SerialTool::hideSearchBar);
     auto* scEscRecv = new QShortcut(QKeySequence(Qt::Key_Escape), m_txtRecv);
     scEscRecv->setContext(Qt::WidgetShortcut);
