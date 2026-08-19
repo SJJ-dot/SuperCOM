@@ -124,6 +124,7 @@ private:
     void updateSearchCountLabel();       // 刷新匹配计数标签与箭头可用状态
     void toggleSearchBar();              // Ctrl+F：显示/隐藏接收区右上角搜索条
     void hideSearchBar();                // 关闭搜索条并清空搜索状态
+    void onRecvContextMenu(const QPoint& pos); // 接收区右键菜单：清除/HEX/时间戳/暂停/编码/查找
     void onRecvScroll(int value);
     void scrollRecvToBottom();       // 一键回到底部并恢复刷新（右下角悬浮按钮）
     void positionScrollBottomBtn();  // 把悬浮按钮定位到滚动条下方（跟随窗口缩放）

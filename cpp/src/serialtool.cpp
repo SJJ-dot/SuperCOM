@@ -338,6 +338,10 @@ void SerialTool::buildUi() {
     QFont mono(QStringLiteral("Consolas"), 10);
     m_txtRecv->setFont(mono);
     m_txtRecv->setLineWrapMode(QTextEdit::WidgetWidth);
+    // 接收区右键菜单：清除窗口 / HEX显示 / 时间戳 / 暂停刷新 / 编码修改 / 查找
+    m_txtRecv->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_txtRecv, &QWidget::customContextMenuRequested,
+            this, &SerialTool::onRecvContextMenu);
     recvLay->addWidget(m_txtRecv, 0, 0);
     upperRow->addWidget(recvBox, 1);
 
@@ -385,8 +389,17 @@ void SerialTool::buildUi() {
     m_btnSearchClose->setCursor(Qt::PointingHandCursor);
     connect(m_btnSearchClose, &QPushButton::clicked, this, &SerialTool::hideSearchBar);
     sbLay->addWidget(m_btnSearchClose);
-    // 悬浮于接收区右上角；后 add 的在 QGridLayout 同格中位于上层
-    recvLay->addWidget(m_searchBar, 0, 0, Qt::AlignTop | Qt::AlignRight);
+    // 悬浮于接收区右上角；后 add 的在 QGridLayout 同格中位于上层。
+    // 用一层宿主 widget 加右边距（= 滚动条宽度 + 4），把搜索条左移，避免遮挡右侧滚动条
+    auto* sbHost = new QWidget(recvBox);
+    sbHost->setObjectName(QStringLiteral("sbHost"));
+    sbHost->setStyleSheet(QStringLiteral("#sbHost{background:transparent;border:none;}"));
+    auto* sbHostLay = new QHBoxLayout(sbHost);
+    const int sbExtent = m_txtRecv->style()->pixelMetric(QStyle::PM_ScrollBarExtent,
+                                                        nullptr, m_txtRecv);
+    sbHostLay->setContentsMargins(0, 0, sbExtent + 4, 0);
+    sbHostLay->addWidget(m_searchBar);
+    recvLay->addWidget(sbHost, 0, 0, Qt::AlignTop | Qt::AlignRight);
     m_searchBar->hide();
     // Ctrl+F：焦点在接收区时唤出搜索条（再按一次关闭）
     auto* scFind = new QShortcut(QKeySequence::Find, m_txtRecv);
@@ -396,10 +409,13 @@ void SerialTool::buildUi() {
     auto* scFindBar = new QShortcut(QKeySequence::Find, m_searchBar);
     scFindBar->setContext(Qt::WidgetShortcut);
     connect(scFindBar, &QShortcut::activated, this, &SerialTool::toggleSearchBar);
-    // Esc 关闭搜索条
+    // Esc 关闭搜索条（焦点在搜索条内 / 接收区内都生效）
     auto* scEsc = new QShortcut(QKeySequence(Qt::Key_Escape), m_searchBar);
     scEsc->setContext(Qt::WidgetShortcut);
     connect(scEsc, &QShortcut::activated, this, &SerialTool::hideSearchBar);
+    auto* scEscRecv = new QShortcut(QKeySequence(Qt::Key_Escape), m_txtRecv);
+    scEscRecv->setContext(Qt::WidgetShortcut);
+    connect(scEscRecv, &QShortcut::activated, this, &SerialTool::hideSearchBar);
 
     // 右侧：历史/快捷命令（默认隐藏，固定宽 420）
     m_msTabs = new QTabWidget(upper);
@@ -1641,6 +1657,60 @@ void SerialTool::hideSearchBar() {
     m_entrySearch->blockSignals(false);
     updateSearchCountLabel();
     m_txtRecv->setFocus();
+}
+
+void SerialTool::onRecvContextMenu(const QPoint& pos) {
+    if (!m_txtRecv)
+        return;
+    // 各选项与顶部按钮行共享同一组控件，菜单只做"切换/唤出"，状态实时同步
+    QMenu menu(this);
+    menu.setObjectName(QStringLiteral("recvMenu"));
+
+    auto* actClear = menu.addAction(QStringLiteral("清除窗口"));
+    connect(actClear, &QAction::triggered, this, &SerialTool::clearRecv);
+    auto* actSave = menu.addAction(QStringLiteral("保存txt"));
+    connect(actSave, &QAction::triggered, this, &SerialTool::saveRecv);
+    menu.addSeparator();
+
+    auto* actHex = menu.addAction(QStringLiteral("HEX显示"));
+    actHex->setCheckable(true);
+    actHex->setChecked(m_chkShowHex->isChecked());
+    connect(actHex, &QAction::triggered, this, [this] {
+        m_chkShowHex->setChecked(!m_chkShowHex->isChecked());
+    });
+
+    auto* actTs = menu.addAction(QStringLiteral("时间戳"));
+    actTs->setCheckable(true);
+    actTs->setChecked(m_chkShowTs->isChecked());
+    connect(actTs, &QAction::triggered, this, [this] {
+        m_chkShowTs->setChecked(!m_chkShowTs->isChecked());
+    });
+
+    auto* actPause = menu.addAction(QStringLiteral("暂停刷新"));
+    actPause->setCheckable(true);
+    actPause->setChecked(m_chkPause->isChecked());
+    connect(actPause, &QAction::triggered, this, [this] {
+        m_chkPause->setChecked(!m_chkPause->isChecked());
+    });
+    menu.addSeparator();
+
+    // 编码修改：子菜单列出全部编码，勾选当前项
+    auto* encMenu = menu.addMenu(QStringLiteral("编码修改"));
+    const QString curEnc = m_cmbEncoding->currentText();
+    for (const QString& enc : sjj::ENCODINGS) {
+        auto* a = encMenu->addAction(enc);
+        a->setCheckable(true);
+        a->setChecked(enc == curEnc);
+        connect(a, &QAction::triggered, this, [this, enc] {
+            m_cmbEncoding->setCurrentText(enc);
+        });
+    }
+    menu.addSeparator();
+
+    auto* actFind = menu.addAction(QStringLiteral("查找\tCtrl+F"));
+    connect(actFind, &QAction::triggered, this, &SerialTool::toggleSearchBar);
+
+    menu.exec(m_txtRecv->viewport()->mapToGlobal(pos));
 }
 
 void SerialTool::onSearchChange() {
