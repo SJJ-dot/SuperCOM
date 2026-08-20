@@ -303,7 +303,7 @@ private:
     QTimer* m_msLoopTimer = nullptr;
     QFileSystemWatcher* m_cfgWatcher = nullptr;   // 监听配置文件（快捷命令同步）
     QTimer* m_cfgSaveTimer = nullptr;             // 快捷命令保存防抖
-    QVector<QVector<QWidget*>> m_msRowWidgets;   // 每行控件
+    QVector<QVector<QWidget*>> m_msRowWidgets;   // 快捷命令每行控件
     QString m_theme = QStringLiteral("light");
     QString m_winBg;
     sjj::ThemeColors m_themeC;

@@ -36,6 +36,9 @@ ThemeColors themeDark() {
     t["combo_item_sel"]  = QStringLiteral("#585B70");   // 深色下拉选中背景：surface2（#24273A 对比太弱不可见，#313244 也弱；#585B70 明显但不刺眼）
     t["list_bg"]         = QStringLiteral("#181825");
     t["list_sel"]        = QStringLiteral("#313244");
+    t["row_alt_bg"]      = QStringLiteral("#2A2C3A");   // 列表奇偶行交替背景（深色主题，柔和 surface）
+    t["row0_bg"]         = QStringLiteral("#40A02B");   // 奇偶行交替色 0（绿）
+    t["row1_bg"]         = QStringLiteral("#C77D14");   // 奇偶行交替色 1（橙）
     t["menu_bg"]         = QStringLiteral("#1E1E2E");
     t["menu_sel"]        = QStringLiteral("#313244");
     t["menu_fg"]         = QStringLiteral("#CDD6F4");
@@ -87,6 +90,9 @@ ThemeColors themeLight() {
     t["combo_item_sel"]  = QStringLiteral("#EFF1F5");   // 浅色下拉选中背景（用户指定，与 win_bg 一致）
     t["list_bg"]         = QStringLiteral("#FFFFFF");
     t["list_sel"]        = QStringLiteral("#E6E9EF");
+    t["row_alt_bg"]      = QStringLiteral("#E9EFFB");   // 列表奇偶行交替背景（浅色主题，柔和淡蓝）
+    t["row0_bg"]         = QStringLiteral("#40A02B");   // 奇偶行交替色 0（绿）
+    t["row1_bg"]         = QStringLiteral("#C77D14");   // 奇偶行交替色 1（橙）
     t["menu_bg"]         = QStringLiteral("#FFFFFF");
     t["menu_sel"]        = QStringLiteral("#E6E9EF");
     t["menu_fg"]         = QStringLiteral("#4C4F69");
@@ -124,6 +130,28 @@ QPushButton{background-color:{btn_bg};color:{btn_fg};border:1px solid {input_bor
 QPushButton:hover{background-color:{btn_hover};}
 QPushButton:pressed{background-color:{panel_border};}
 QPushButton:disabled{color:{text_secondary};}
+/* 强调按钮：按功能区分颜色（Catppuccin 调色板，深浅主题均清晰） */
+QPushButton#btnConnect{background-color:#40A02B;color:#FFFFFF;border-color:#40A02B;}
+QPushButton#btnConnect:hover{background-color:#36821F;}
+QPushButton#btnDisconnect{background-color:#D20F39;color:#FFFFFF;border-color:#D20F39;}
+QPushButton#btnDisconnect:hover{background-color:#B30F30;}
+QPushButton#btnSend{background-color:#1E66F5;color:#FFFFFF;border-color:#1E66F5;}
+QPushButton#btnSend:hover{background-color:#1A5AD4;}
+QPushButton#btnClearSend{background-color:#FE640B;color:#FFFFFF;border-color:#FE640B;}
+QPushButton#btnClearSend:hover{background-color:#E05900;}
+QPushButton#btnPrimary{background-color:#1E66F5;color:#FFFFFF;border-color:#1E66F5;}
+QPushButton#btnPrimary:hover{background-color:#1A5AD4;}
+/* 间隔条纹色按钮组（相邻按钮用不同色，避免单调疲劳） */
+QPushButton#btnClearRecv{background-color:#DF8E1D;color:#FFFFFF;border-color:#DF8E1D;}
+QPushButton#btnClearRecv:hover{background-color:#C77D14;}
+QPushButton#btnSendFile{background-color:#179299;color:#FFFFFF;border-color:#179299;}
+QPushButton#btnSendFile:hover{background-color:#128086;}
+QPushButton#btnStopSend{background-color:#D20F39;color:#FFFFFF;border-color:#D20F39;}
+QPushButton#btnStopSend:hover{background-color:#B30F30;}
+QPushButton#btnQuickCmd{background-color:#8839EF;color:#FFFFFF;border-color:#8839EF;}
+QPushButton#btnQuickCmd:hover{background-color:#7A2FD6;}
+QPushButton#btnHistory{background-color:#209FB5;color:#FFFFFF;border-color:#209FB5;}
+QPushButton#btnHistory:hover{background-color:#1B8799;}
 QLineEdit{background-color:{input_bg};color:{text_primary};border:1px solid {input_border};border-radius:5px;padding:2px 6px;}
 QLineEdit:focus{border-color:{accent};}
 QComboBox{background-color:{input_bg};color:{text_primary};border:1px solid {input_border};border-radius:5px;padding:2px 8px;}

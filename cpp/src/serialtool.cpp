@@ -431,6 +431,7 @@ void SerialTool::buildUi() {
     auto* rt = new QHBoxLayout;
     rt->setSpacing(4);
     auto* btn = new QPushButton(QStringLiteral("清除窗口"), upper);
+    btn->setObjectName(QStringLiteral("btnClearRecv"));
     connect(btn, &QPushButton::clicked, this, &SerialTool::clearRecv);
     rt->addWidget(btn);
     m_chkShowHex = new ThemeCheckBox(QStringLiteral("HEX显示"), upper);
@@ -455,9 +456,11 @@ void SerialTool::buildUi() {
     connect(btn, &QPushButton::clicked, this, &SerialTool::saveRecv);
     rt->addWidget(btn);
     btn = new QPushButton(QStringLiteral("历史记录"), upper);
+    btn->setObjectName(QStringLiteral("btnHistory"));
     connect(btn, &QPushButton::clicked, this, [this] { toggleWindow(0); });
     rt->addWidget(btn);
     btn = new QPushButton(QStringLiteral("快捷命令"), upper);
+    btn->setObjectName(QStringLiteral("btnQuickCmd"));
     connect(btn, &QPushButton::clicked, this, [this] { toggleWindow(1); });
     rt->addWidget(btn);
     rt->addStretch(1);
@@ -518,6 +521,7 @@ void SerialTool::buildUi() {
     connect(btn, &QPushButton::clicked, this, &SerialTool::showSettingsDialog);
     optRow->addWidget(btn, 1);
     m_btnOpen = new QPushButton(QStringLiteral("打开串口"), sbBox);
+    m_btnOpen->setObjectName(QStringLiteral("btnConnect"));
     connect(m_btnOpen, &QPushButton::clicked, this, &SerialTool::togglePort);
     optRow->addWidget(m_btnOpen, 1);
     sb->addLayout(optRow);
@@ -530,6 +534,7 @@ void SerialTool::buildUi() {
     connect(m_btnSelectFile, &QPushButton::clicked, this, &SerialTool::pickFile);
     fileRow->addWidget(m_btnSelectFile, 1);
     m_btnSendFile = new QPushButton(QStringLiteral("发送文件"), sbBox);
+    m_btnSendFile->setObjectName(QStringLiteral("btnSendFile"));
     connect(m_btnSendFile, &QPushButton::clicked, this, &SerialTool::sendFile);
     fileRow->addWidget(m_btnSendFile, 1);
     sb->addLayout(fileRow);
@@ -584,9 +589,11 @@ void SerialTool::buildUi() {
     auto* sbar = new QHBoxLayout;
     sbar->setSpacing(4);
     auto* btnSend = new QPushButton(QStringLiteral("发送"), sendBox);
+    btnSend->setObjectName(QStringLiteral("btnSend"));
     connect(btnSend, &QPushButton::clicked, this, &SerialTool::send);
     sbar->addWidget(btnSend);
     btn = new QPushButton(QStringLiteral("清空发送"), sendBox);
+    btn->setObjectName(QStringLiteral("btnClearSend"));
     connect(btn, &QPushButton::clicked, this, &SerialTool::clearSend);
     sbar->addWidget(btn);
     m_chkAddCrlf = new ThemeCheckBox(QStringLiteral("加回车换行"), sendBox);
@@ -684,6 +691,7 @@ void SerialTool::buildHistoryTab() {
     bar->addStretch(1);
     lay->addLayout(bar);
     m_histList = new QListWidget(w);
+    m_histList->setObjectName(QStringLiteral("histList"));
     connect(m_histList, &QListWidget::itemDoubleClicked, this, &SerialTool::histLoad);
     lay->addWidget(m_histList, 1);
     m_msTabs->addTab(w, QStringLiteral("历史记录"));
@@ -1270,6 +1278,9 @@ void SerialTool::openPort() {
     m_pktStartTs.clear();
     m_pktTimer->stop();
     m_btnOpen->setText(QStringLiteral("关闭串口"));
+    m_btnOpen->setObjectName(QStringLiteral("btnDisconnect"));
+    m_btnOpen->style()->unpolish(m_btnOpen);
+    m_btnOpen->style()->polish(m_btnOpen);
     refreshStatus();
     addRecord(QStringLiteral("sys"),
               QStringLiteral("串口已打开: %1 @ %2").arg(port).arg(baud));
@@ -1291,6 +1302,9 @@ void SerialTool::closePort() {
     // 关闭串口前把待分包缓存作为一条送出（避免最后一段数据丢失）
     flushRxPacket();
     m_btnOpen->setText(QStringLiteral("打开串口"));
+    m_btnOpen->setObjectName(QStringLiteral("btnConnect"));
+    m_btnOpen->style()->unpolish(m_btnOpen);
+    m_btnOpen->style()->polish(m_btnOpen);
     refreshStatus();
     addRecord(QStringLiteral("sys"), QStringLiteral("串口已关闭"));
 }
@@ -2294,6 +2308,9 @@ void SerialTool::sendFile() {
     m_fileWaitingWrite = false;
     m_fileSending = true;
     m_btnSendFile->setText(QStringLiteral("停止发送"));
+    m_btnSendFile->setObjectName(QStringLiteral("btnStopSend"));
+    m_btnSendFile->style()->unpolish(m_btnSendFile);
+    m_btnSendFile->style()->polish(m_btnSendFile);
     addRecord(QStringLiteral("sys"),
               QStringLiteral("开始发送文件: %1 (%2 字节)")
                   .arg(QFileInfo(m_selectedFilePath).fileName()).arg(m_fileData.size()));
@@ -2358,6 +2375,9 @@ void SerialTool::endSendFile() {
     m_fileData.clear();
     m_fileOffset = 0;
     m_btnSendFile->setText(QStringLiteral("发送文件"));
+    m_btnSendFile->setObjectName(QStringLiteral("btnSendFile"));
+    m_btnSendFile->style()->unpolish(m_btnSendFile);
+    m_btnSendFile->style()->polish(m_btnSendFile);
 }
 
 // ================= 历史记录 =================
