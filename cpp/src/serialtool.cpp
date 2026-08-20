@@ -296,8 +296,9 @@ void SerialTool::buildUi() {
     while (ver.startsWith(QLatin1Char('v')) || ver.startsWith(QLatin1Char('V')))
         ver.remove(0, 1);
     setWindowTitle(QStringLiteral("%1  v%2").arg(sjj::APP_TITLE, ver));
-    resize(900, 560);
-    setMinimumSize(900, 560);
+    // 默认宽度取到"校验组控件（第X字节…加校验）右侧"，不留多余弹性空白
+    resize(690, 500);
+    setMinimumSize(640, 500);
 
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
@@ -453,6 +454,12 @@ void SerialTool::buildUi() {
     btn = new QPushButton(QStringLiteral("保存数据"), upper);
     connect(btn, &QPushButton::clicked, this, &SerialTool::saveRecv);
     rt->addWidget(btn);
+    btn = new QPushButton(QStringLiteral("历史记录"), upper);
+    connect(btn, &QPushButton::clicked, this, [this] { toggleWindow(0); });
+    rt->addWidget(btn);
+    btn = new QPushButton(QStringLiteral("快捷命令"), upper);
+    connect(btn, &QPushButton::clicked, this, [this] { toggleWindow(1); });
+    rt->addWidget(btn);
     rt->addStretch(1);
     upperLay->addLayout(rt);
 
@@ -469,11 +476,12 @@ void SerialTool::buildUi() {
 
     // 左侧：串口设置块
     auto* sbBox = new QGroupBox(QString(), content);
-    sbBox->setMaximumWidth(290);
+    sbBox->setMaximumWidth(230);
     auto* sb = new QVBoxLayout(sbBox);
-    sb->setContentsMargins(6, 6, 6, 6);
-    sb->setSpacing(2);
+    sb->setContentsMargins(6, 1, 6, 1);
+    sb->setSpacing(1);
 
+    // 第 1 行：端口号（刷新按钮已移至波特率行，区域缩窄）
     auto* portRow = new QHBoxLayout;
     portRow->setSpacing(2);
     portRow->addWidget(new QLabel(QStringLiteral("端口号:"), sbBox));
@@ -481,12 +489,9 @@ void SerialTool::buildUi() {
     m_cmbPort->setEditable(false);
     m_cmbPort->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     portRow->addWidget(m_cmbPort, 1);
-    btn = new QPushButton(QStringLiteral("刷新"), sbBox);
-    btn->setFixedWidth(40);
-    connect(btn, &QPushButton::clicked, this, &SerialTool::refreshPorts);
-    portRow->addWidget(btn);
     sb->addLayout(portRow);
 
+    // 第 2 行：波特率 + 刷新按钮
     auto* baudRow = new QHBoxLayout;
     baudRow->setSpacing(2);
     auto* lblBaud = new QLabel(QStringLiteral("波特率:"), sbBox);
@@ -500,46 +505,51 @@ void SerialTool::buildUi() {
     baudRow->addWidget(m_cmbBaud, 1);
     connect(m_cmbPort, &QComboBox::currentIndexChanged, this, &SerialTool::onPortChanged);
     connect(m_cmbBaud, &QComboBox::currentIndexChanged, this, &SerialTool::onBaudChanged);
-    btn = new QPushButton(QStringLiteral("更多设置"), sbBox);
-    btn->setFixedWidth(70);
-    connect(btn, &QPushButton::clicked, this, &SerialTool::showSettingsDialog);
+    btn = new QPushButton(QStringLiteral("刷新"), sbBox);
+    btn->setFixedWidth(40);
+    connect(btn, &QPushButton::clicked, this, &SerialTool::refreshPorts);
     baudRow->addWidget(btn);
-    m_btnOpen = new QPushButton(QStringLiteral("打开串口"), sbBox);
-    m_btnOpen->setFixedWidth(70);
-    connect(m_btnOpen, &QPushButton::clicked, this, &SerialTool::togglePort);
-    baudRow->addWidget(m_btnOpen);
     sb->addLayout(baudRow);
 
-    auto* btnRow = new QHBoxLayout;
-    btnRow->setSpacing(2);
-    btn = new QPushButton(QStringLiteral("历史记录"), sbBox);
-    connect(btn, &QPushButton::clicked, this, [this] { toggleWindow(0); });
-    btnRow->addWidget(btn, 1);
-    btn = new QPushButton(QStringLiteral("快捷命令"), sbBox);
-    connect(btn, &QPushButton::clicked, this, [this] { toggleWindow(1); });
-    btnRow->addWidget(btn, 1);
-    sb->addLayout(btnRow);
-    sb->addStretch(1);
+    // 第 3 行：更多设置 + 打开串口
+    auto* optRow = new QHBoxLayout;
+    optRow->setSpacing(2);
+    btn = new QPushButton(QStringLiteral("更多设置"), sbBox);
+    connect(btn, &QPushButton::clicked, this, &SerialTool::showSettingsDialog);
+    optRow->addWidget(btn, 1);
+    m_btnOpen = new QPushButton(QStringLiteral("打开串口"), sbBox);
+    connect(m_btnOpen, &QPushButton::clicked, this, &SerialTool::togglePort);
+    optRow->addWidget(m_btnOpen, 1);
+    sb->addLayout(optRow);
+
+    // 第 4 行：选择文件 + 发送文件（从发送区移入）
+    auto* fileRow = new QHBoxLayout;
+    fileRow->setSpacing(2);
+    m_btnSelectFile = new QPushButton(QStringLiteral("选择文件"), sbBox);
+    m_btnSelectFile->setToolTip(QStringLiteral("点击选择要发送的文件"));
+    connect(m_btnSelectFile, &QPushButton::clicked, this, &SerialTool::pickFile);
+    fileRow->addWidget(m_btnSelectFile, 1);
+    m_btnSendFile = new QPushButton(QStringLiteral("发送文件"), sbBox);
+    connect(m_btnSendFile, &QPushButton::clicked, this, &SerialTool::sendFile);
+    fileRow->addWidget(m_btnSendFile, 1);
+    sb->addLayout(fileRow);
     lower->addWidget(sbBox);
 
     // 右侧：发送区
     auto* sendBox = new QGroupBox(QString(), content);
     auto* sendLay = new QVBoxLayout(sendBox);
-    sendLay->setContentsMargins(8, 6, 8, 6);
-    sendLay->setSpacing(3);
+    sendLay->setContentsMargins(8, 4, 8, 4);
+    sendLay->setSpacing(2);
 
+    // 校验范围 + 算法（整组包进 cs_group，≠None 时高亮）。
+    // 选择文件/发送文件按钮已移至左侧"历史记录"下方（fileRow）
     auto* fb = new QHBoxLayout;
     fb->setSpacing(4);
     fb->setAlignment(Qt::AlignVCenter);
-    m_btnSelectFile = new QPushButton(QStringLiteral("选择文件"), sendBox);
-    m_btnSelectFile->setToolTip(QStringLiteral("点击选择要发送的文件"));
-    connect(m_btnSelectFile, &QPushButton::clicked, this, &SerialTool::pickFile);
-    fb->addWidget(m_btnSelectFile, 1);
-    m_btnSendFile = new QPushButton(QStringLiteral("发送文件"), sendBox);
-    connect(m_btnSendFile, &QPushButton::clicked, this, &SerialTool::sendFile);
-    fb->addWidget(m_btnSendFile);
-
-    // 加校验范围 + 算法（整组包进 cs_group，≠None 时高亮）
+    // HEX发送 置于校验范围组（第X字节…）之前
+    m_chkSendHex = new ThemeCheckBox(QStringLiteral("HEX发送"), sendBox);
+    connect(m_chkSendHex, &QCheckBox::stateChanged, this, &SerialTool::onSendHexToggle);
+    fb->addWidget(m_chkSendHex);
     m_csGroup = new QFrame(sendBox);
     m_csGroup->setObjectName(QStringLiteral("cs_group"));
     m_csGroup->setFrameShape(QFrame::NoFrame);
@@ -579,9 +589,6 @@ void SerialTool::buildUi() {
     btn = new QPushButton(QStringLiteral("清空发送"), sendBox);
     connect(btn, &QPushButton::clicked, this, &SerialTool::clearSend);
     sbar->addWidget(btn);
-    m_chkSendHex = new ThemeCheckBox(QStringLiteral("HEX发送"), sendBox);
-    connect(m_chkSendHex, &QCheckBox::stateChanged, this, &SerialTool::onSendHexToggle);
-    sbar->addWidget(m_chkSendHex);
     m_chkAddCrlf = new ThemeCheckBox(QStringLiteral("加回车换行"), sendBox);
     sbar->addWidget(m_chkAddCrlf);
     m_chkTimer = new ThemeCheckBox(QStringLiteral("定时发送:"), sendBox);
@@ -597,9 +604,9 @@ void SerialTool::buildUi() {
     m_txtSend = new QTextEdit(sendBox);
     m_txtSend->setObjectName(QStringLiteral("txt_send"));   // 让全局 QSS 给发送框加边框
     m_txtSend->setFont(mono);
-    m_txtSend->setFixedHeight(90);
+    m_txtSend->setFixedHeight(65);      // 固定高度，比上两行高，但不撑大整体高度
     connect(m_txtSend, &QTextEdit::textChanged, this, &SerialTool::updateCsPreview);
-    sendLay->addWidget(m_txtSend, 1);
+    sendLay->addWidget(m_txtSend, 0);   // 不拉伸，sendBox 高度跟随左侧 sbBox
     lower->addWidget(sendBox, 1);
 
     // ===== 状态栏 =====
@@ -1255,6 +1262,7 @@ void SerialTool::openPort() {
     ser->setRequestToSend(false);
     connect(ser, &QSerialPort::readyRead, this, &SerialTool::onSerialData);
     connect(ser, &QSerialPort::errorOccurred, this, &SerialTool::onSerialError);
+    connect(ser, &QSerialPort::bytesWritten, this, &SerialTool::onFileBytesWritten);
     m_ser = ser;
     ++m_rxEpoch;
     // 打开新串口前清掉待分包缓存，避免上个会话残留数据冒出
@@ -2283,6 +2291,7 @@ void SerialTool::sendFile() {
         data += "\r\n";
     m_fileData = applyChecksum(data).first;
     m_fileOffset = 0;
+    m_fileWaitingWrite = false;
     m_fileSending = true;
     m_btnSendFile->setText(QStringLiteral("停止发送"));
     addRecord(QStringLiteral("sys"),
@@ -2291,6 +2300,10 @@ void SerialTool::sendFile() {
     QTimer::singleShot(0, this, &SerialTool::sendFileChunk);
 }
 
+// 文件发送由 QSerialPort::bytesWritten 信号驱动：一块数据真正从串口发出后
+// 才写入下一块。完成判定精确（最后一块的 bytesWritten 到达 = 全部发出），
+// 且天然限流，不会瞬间灌爆内部缓冲。不用 clear()（该 API 中止异步写后
+// Qt 内部写状态不恢复，会导致后续 write 只进缓冲、永远发不出去）。
 void SerialTool::sendFileChunk() {
     if (!m_fileSending) {
         endSendFile();
@@ -2300,8 +2313,11 @@ void SerialTool::sendFileChunk() {
         endSendFile();
         return;
     }
-    const QByteArray chunk = m_fileData.mid(m_fileOffset, 4096);
+    if (m_fileWaitingWrite)
+        return;   // 上一块仍在等待 bytesWritten 确认
+    const QByteArray chunk = m_fileData.mid(m_fileOffset, 512);
     if (chunk.isEmpty()) {
+        // 所有块均已 write 且已被 bytesWritten 确认发出 → 真正完成
         endSendFile();
         addRecord(QStringLiteral("sys"), QStringLiteral("文件发送完成"));
         return;
@@ -2312,9 +2328,22 @@ void SerialTool::sendFileChunk() {
         endSendFile();
         return;
     }
+    if (n == 0) {
+        // 内部缓冲满未写入：稍后重试同一块（默认缓冲无限，正常不会走到）
+        QTimer::singleShot(2, this, &SerialTool::sendFileChunk);
+        return;
+    }
     m_txBytes += quint64(n);
     m_fileOffset += n;
-    QTimer::singleShot(2, this, &SerialTool::sendFileChunk);
+    m_fileWaitingWrite = true;   // 等 bytesWritten 信号再发下一块
+}
+
+void SerialTool::onFileBytesWritten(qint64) {
+    // bytesWritten 对一切 write 都触发（含手动/定时发送），仅文件发送期间推进
+    if (!m_fileSending)
+        return;
+    m_fileWaitingWrite = false;
+    sendFileChunk();
 }
 
 void SerialTool::stopSendFile() {
@@ -2325,6 +2354,7 @@ void SerialTool::stopSendFile() {
 
 void SerialTool::endSendFile() {
     m_fileSending = false;
+    m_fileWaitingWrite = false;
     m_fileData.clear();
     m_fileOffset = 0;
     m_btnSendFile->setText(QStringLiteral("发送文件"));

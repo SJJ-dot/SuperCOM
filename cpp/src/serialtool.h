@@ -104,6 +104,7 @@ private:
     void closePort();
     void onSerialData();
     void onSerialError(QSerialPort::SerialPortError err);
+    void onFileBytesWritten(qint64 bytes);
     void refreshStatus();
 
     // ---------- 接收渲染 ----------
@@ -281,6 +282,7 @@ private:
     bool m_fileSending = false;
     QByteArray m_fileData;
     qsizetype m_fileOffset = 0;
+    bool m_fileWaitingWrite = false; // 文件发送：上一块已入缓冲，等 bytesWritten 确认后再发下一块
     QString m_selectedFilePath;
     QDialog* m_settingsWin = nullptr;
     bool m_suppressApply = false;    // 程序化修改串口参数时抑制"自动重开"
