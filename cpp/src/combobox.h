@@ -6,6 +6,10 @@
 #include <QLabel>
 #include <QStyledItemDelegate>
 
+class PopupPressEnforceFilter;
+class PopupFallbackFilter;
+class PopupHoverFilter;
+
 class StyledComboBox : public QComboBox {
     Q_OBJECT
 public:
@@ -14,9 +18,18 @@ public:
 
 protected:
     void resizeEvent(QResizeEvent* e) override;
+    // 修复 popup 超出主窗口部分单击无效：
+    // 1) 去掉 WS_EX_LAYERED 恢复矩形命中测试；
+    // 2) Press 时强制 setCurrentIndex(点击项)，绕开 Qt 内部 currentIndex 不更新的问题；
+    // 3) Release 后 popup 仍开则兜底手动选中；
+    // 4) MouseMove 手动跟随高亮（Qt 容器 filter 在主窗口外 indexAt 失效）。
+    void showPopup() override;
 
 private:
     QLabel* m_arrow = nullptr;
+    PopupPressEnforceFilter* m_pressEnforceFilter = nullptr;
+    PopupFallbackFilter* m_fallbackFilter = nullptr;
+    PopupHoverFilter* m_hoverFilter = nullptr;
 };
 
 // 弹出列表项：省略号在末尾

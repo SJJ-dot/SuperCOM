@@ -33,7 +33,7 @@ ThemeColors themeDark() {
     t["input_bg"]        = QStringLiteral("#181825");
     t["input_border"]    = QStringLiteral("#45475A");
     t["combo_item_bg"]   = QStringLiteral("#1E1E2E");
-    t["combo_item_sel"]  = QStringLiteral("#313244");
+    t["combo_item_sel"]  = QStringLiteral("#585B70");   // 深色下拉选中背景：surface2（#24273A 对比太弱不可见，#313244 也弱；#585B70 明显但不刺眼）
     t["list_bg"]         = QStringLiteral("#181825");
     t["list_sel"]        = QStringLiteral("#313244");
     t["menu_bg"]         = QStringLiteral("#1E1E2E");
@@ -84,7 +84,7 @@ ThemeColors themeLight() {
     t["input_bg"]        = QStringLiteral("#FFFFFF");
     t["input_border"]    = QStringLiteral("#CCD0DA");
     t["combo_item_bg"]   = QStringLiteral("#FFFFFF");
-    t["combo_item_sel"]  = QStringLiteral("#E6E9EF");
+    t["combo_item_sel"]  = QStringLiteral("#EFF1F5");   // 浅色下拉选中背景（用户指定，与 win_bg 一致）
     t["list_bg"]         = QStringLiteral("#FFFFFF");
     t["list_sel"]        = QStringLiteral("#E6E9EF");
     t["menu_bg"]         = QStringLiteral("#FFFFFF");
@@ -131,6 +131,7 @@ QComboBox:hover{border-color:{accent};}
 QComboBox::drop-down{border:none;subcontrol-origin:padding;subcontrol-position:top right;width:20px;}
 QComboBox::down-arrow{image:none;width:0;height:0;}
 QComboBox QAbstractItemView{background-color:{combo_item_bg};color:{text_primary};selection-background-color:{combo_item_sel};border:1px solid {input_border};}
+QComboBox QAbstractItemView::item:selected{background-color:{combo_item_sel};color:{text_primary};border-left:3px solid {accent};}
 QTextEdit{background-color:{edit_bg};color:{edit_fg};selection-background-color:{edit_sel};border:none;}
 QTextEdit#txt_send{background-color:{edit_send_bg};border:1px solid {input_border};border-radius:5px;padding:3px 6px;}
 QProgressBar{background-color:{progress_bg};border:1px solid {input_border};border-radius:3px;text-align:center;color:{progress_text};}

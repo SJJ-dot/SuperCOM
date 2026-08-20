@@ -33,6 +33,7 @@ inline const QStringList DEFAULT_BAUDRATES = {
     QStringLiteral("128000"), QStringLiteral("230400"), QStringLiteral("256000"),
     QStringLiteral("460800"), QStringLiteral("500000"), QStringLiteral("921600"),
     QStringLiteral("1000000"), QStringLiteral("1500000"), QStringLiteral("2000000"),
+    QStringLiteral("2500000"),
 };
 inline const QStringList DEFAULT_PARITY = {
     QStringLiteral("None"), QStringLiteral("Even"), QStringLiteral("Odd"),
