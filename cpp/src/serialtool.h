@@ -3,6 +3,7 @@
 
 #include <QWidget>
 #include <QSerialPort>
+#include <QSerialPortInfo>
 #include <QVector>
 #include <QStringList>
 #include <QHash>
@@ -24,6 +25,7 @@ class QPushButton;
 class QListWidget;
 class QListWidgetItem;
 class QTabWidget;
+class QTabBar;
 class QScrollArea;
 class QProgressBar;
 class QToolButton;
@@ -33,6 +35,7 @@ class QGroupBox;
 class QVBoxLayout;
 class QHBoxLayout;
 class QFileSystemWatcher;
+class QListWidget;
 
 class UpdateChecker;
 class ExeDownloader;
@@ -55,6 +58,19 @@ struct MsEntry {
     QString label;
 };
 
+// 搜索历史条目（带时间戳，按时间倒序）
+struct SearchHistoryEntry {
+    QString text;
+    qint64 timestamp = 0;   // Unix epoch ms
+};
+
+// 快捷命令分组（可命名、可折叠）
+struct MsGroup {
+    QString name;                       // 分组名（如「测零」「防坠」）
+    bool collapsed = false;             // 是否折叠
+    QVector<MsEntry> entries;           // 组内命令
+};
+
 class SerialTool : public QWidget {
     Q_OBJECT
 public:
@@ -70,7 +86,6 @@ private:
     // ---------- UI 构建 ----------
     void buildUi();
     void buildHistoryTab();
-    void buildMsTab();
 
     // ---------- 主题 ----------
     void applyTheme(const QString& themeName);
@@ -121,6 +136,12 @@ private:
     QString accentHex() const;
     void applyHighlight();
     void onSearchChange();
+    void onSearchOptionChanged();        // 任一选项变化：立即刷新高亮/筛选（VS Code 风格：3 个开关相互独立，可任意组合）
+    void commitSearchHistory();          // 回车/失焦：匹配成功时把当前搜索词记入历史
+    void onSearchFocusOut();             // 搜索框失焦：匹配成功时记录历史
+    void showSearchHistoryPopup();       // 点击下拉箭头：弹出/刷新搜索历史下拉
+    void refreshHistoryPopup();          // 按当前输入框内容过滤并重填历史下拉
+    bool searchMatch(const QString& text) const; // 按 正则/大小写 判定文本是否命中
     void searchJump(int delta);          // 跳转到上一个/下一个匹配（+1 下一个 / -1 上一个）
     void updateSearchCountLabel();       // 刷新匹配计数标签与箭头可用状态
     void toggleSearchBar();              // Ctrl+F：显示/隐藏接收区右上角搜索条
@@ -157,14 +178,22 @@ private:
     void onTimerToggle();
     void timerSendTick();
 
-    // ---------- 多字符串发送 ----------
+    // ---------- 多字符串发送（分组） ----------
     void refreshMsRows();
-    void msSetHex(int i, bool val);
-    void msSetContent(int i, const QString& t);
-    void newMsEntry();
-    void deleteMsEntry(int i);
-    void renameMsEntry(int i);
-    void sendMsEntry(int i);
+    void msSetHex(int g, int i, bool val);
+    void msSetContent(int g, int i, const QString& t);
+    void newMsEntry();                   // 在活动分组新建命令
+    void newMsGroup();                   // 新建分组
+    void deleteMsEntry(int g, int i);
+    void renameMsEntry(int g, int i);
+    void sendMsEntry(int g, int i);
+    void deleteMsGroup(int g);
+    void renameMsGroup(int g, const QString& name);
+    void setActiveMsGroup(int g);        // 设定活动分组（循环发送目标 + 高亮）
+    void applyMsActiveStyle();           // 重绘分组高亮边框
+    void cycleMsTab(int dir);            // 选项卡按顺序切换（dir=-1前/1后）
+    void showTabDropdown();             // 弹出选项卡列表（Qt::ToolTip QListWidget + 全局事件过滤器）
+    void hideTabPopup();               // 隐藏选项卡下拉弹窗
     void startMsLoop();
     void msLoopTick();
     void stopMsLoop();
@@ -193,7 +222,8 @@ private:
 
     // ---------- 配置 ----------
     QString configPath() const;
-    QJsonArray msEntriesToData() const;
+    QJsonArray msGroupsToData() const;
+    QVector<MsGroup> msGroupsFromArray(const QJsonArray& arr) const;  // 从 JSON 还原分组
     void saveParams(bool silent);
     void loadParams(bool silent);
     void loadParamsInner(bool silent);
@@ -213,24 +243,28 @@ private:
     QGroupBox* m_recvBox = nullptr;      // 接收区容器（滚动条下方悬浮按钮的定位基准）
     QPushButton* m_btnScrollBottom = nullptr; // 接收区右下角"回到底部"悬浮按钮（离开底部时显示）
     QTabWidget* m_msTabs = nullptr;
+    QToolButton* m_tabDropdownBtn = nullptr;       // 选项卡右侧下拉箭头
+    QListWidget* m_tabPopup = nullptr;             // 选项卡下拉弹窗（Qt::ToolTip + 全局事件过滤器，和搜索历史弹窗同方案）
     QListWidget* m_histList = nullptr;
-    QScrollArea* m_msScroll = nullptr;
-    QWidget* m_msInner = nullptr;
-    QVBoxLayout* m_msRows = nullptr;
-    QLabel* m_lblMsHint = nullptr;
+    QWidget* m_msPanel = nullptr;        // 右侧面板容器（顶部工具栏 + 选项卡）
 
     ThemeCheckBox* m_chkShowHex = nullptr;
     ThemeCheckBox* m_chkShowTs = nullptr;
     ThemeCheckBox* m_chkPause = nullptr;
-    ThemeCheckBox* m_chkFilter = nullptr;
     StyledComboBox* m_cmbEncoding = nullptr;
     QWidget* m_searchBar = nullptr;         // 接收区右上角悬浮搜索条（默认隐藏）
     QLineEdit* m_entrySearch = nullptr;
     QLabel* m_lblSearchCount = nullptr;   // 搜索匹配计数 "x/y"
-    QPushButton* m_btnSearchPrev = nullptr;  // 上一个匹配
-    QPushButton* m_btnSearchNext = nullptr;  // 下一个匹配
-    QPushButton* m_btnSearchClose = nullptr; // 关闭搜索条
-
+    QToolButton* m_btnSearchPrev = nullptr;  // 上一个匹配
+    QToolButton* m_btnSearchNext = nullptr;  // 下一个匹配
+    QToolButton* m_btnSearchClose = nullptr; // 关闭搜索条
+    QToolButton* m_btnRegex = nullptr;      // 正则匹配按钮（文本 ".*"）
+    QToolButton* m_btnCase = nullptr;       // 大小写敏感按钮（文本 "Cc"，亮起=区分大小写）
+    QToolButton* m_btnFilter = nullptr;     // 筛选按钮（图标）
+    QToolButton* m_btnClearSearch = nullptr; // 清空当前输入（图标 ✕）
+    QListWidget* m_historyPopup = nullptr;   // 搜索历史下拉（顶层 ToolTip，箭头唤出）
+    QString m_searchText;                    // 上一次搜索词（关闭时记忆，重开恢复）
+    QVector<SearchHistoryEntry> m_searchHistory; // 搜索历史（带时间戳，时间倒序）
     PortComboBox* m_cmbPort = nullptr;
     StyledComboBox* m_cmbBaud = nullptr;
     QPushButton* m_btnOpen = nullptr;
@@ -275,10 +309,12 @@ private:
     // 50ms 定时器按队首到尾顺序刷新——保证显示顺序与实际收发顺序一致
     QVector<Record> m_pendingEvents;
     QStringList m_sendHistory;                        // 发送历史（去重、置顶、上限 50）
-    QVector<MsEntry> m_msEntries;
+    QVector<MsGroup> m_msGroups;                      // 快捷命令分组
+    int m_activeMsGroup = 0;                          // 当前活动分组（循环发送目标）
     QHash<QString, QString> m_portMap;                // 显示 label → 设备名
     bool m_msLooping = false;
-    int m_msLoopIndex = 0;
+    int m_msLoopIndex = 0;                            // 循环发送在活动组内的下标
+    int m_msLoopGroup = 0;                            // 循环发送锁定到的分组
     bool m_fileSending = false;
     QByteArray m_fileData;
     qsizetype m_fileOffset = 0;
@@ -296,14 +332,14 @@ private:
     bool m_sendHexPrev = false;
     QTimer* m_csPreviewTimer = nullptr;
     QTimer* m_searchTimer = nullptr;
-    QVector<int> m_searchHits;          // 搜索匹配位置（字符偏移），配合计数/跳转
+    QVector<int> m_searchHits;          // 搜索匹配起点（字符偏移），配合计数/跳转
+    QVector<int> m_searchHitLens;       // 每个匹配的长度（正则时 != needle 长度）
     int m_searchIndex = -1;             // 当前选中匹配下标（-1 未定位）
     QTimer* m_flushTimer = nullptr;
     QTimer* m_timerSend = nullptr;
     QTimer* m_msLoopTimer = nullptr;
     QFileSystemWatcher* m_cfgWatcher = nullptr;   // 监听配置文件（快捷命令同步）
     QTimer* m_cfgSaveTimer = nullptr;             // 快捷命令保存防抖
-    QVector<QVector<QWidget*>> m_msRowWidgets;   // 快捷命令每行控件
     QString m_theme = QStringLiteral("light");
     QString m_winBg;
     sjj::ThemeColors m_themeC;
@@ -326,6 +362,8 @@ private:
     QByteArray m_rxBuf;
     QString m_pktStartTs;                 // 当前包首字节到达时刻（作该条时间戳）
     QTimer* m_pktTimer = nullptr;         // 分包空闲定时器（singleShot）
+    QTimer* m_portPollTimer = nullptr;   // 串口热插拔轮询（2s 周期）
+    QStringList m_lastPortDevs;           // 上次检测到的端口名集合（用于变更比较）
     // 分包上限 64KB：单条记录变小，50ms 刷入更均匀，
     // 避免 512KB 大包一次插入 1.5MB HEX 文本把 UI 卡死
     static constexpr qsizetype MAX_RX_BUF = 64 * 1024;

@@ -9,12 +9,16 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QToolButton>
 #include <QTextEdit>
 #include <QCheckBox>
+#include <QRegularExpression>
+#include <QOverload>
 #include <QComboBox>
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QTabWidget>
+#include <QTabBar>
 #include <QScrollArea>
 #include <QFileDialog>
 #include <QInputDialog>
@@ -33,6 +37,7 @@
 #include <QColor>
 #include <QIcon>
 #include <QPainter>
+#include <QClipboard>
 #include <QStyle>
 #include <QStyleOption>
 #include <QTimer>
@@ -102,6 +107,7 @@ SerialTool::SerialTool(QWidget* parent) : QWidget(parent) {
     m_resizeMargin = 8;
     m_resizeEdge = 0;
     installResizeFilter();
+    qApp->installEventFilter(this);   // 全局拦截：搜索历史弹窗外部点击
 
     m_flushTimer = new QTimer(this);
     connect(m_flushTimer, &QTimer::timeout, this, &SerialTool::drainRx);
@@ -111,6 +117,27 @@ SerialTool::SerialTool(QWidget* parent) : QWidget(parent) {
     m_pktTimer = new QTimer(this);
     m_pktTimer->setSingleShot(true);
     connect(m_pktTimer, &QTimer::timeout, this, &SerialTool::flushRxPacket);
+
+    // 串口热插拔自动检测：每 2 秒轮询端口列表，变化时才刷新 UI
+    m_portPollTimer = new QTimer(this);
+    m_portPollTimer->setInterval(2000);
+    connect(m_portPollTimer, &QTimer::timeout, this, [this] {
+        // 收集当前可用端口设备名集合
+        QStringList curDevs;
+        for (const auto& info : QSerialPortInfo::availablePorts())
+            curDevs << info.portName();
+        curDevs.sort();
+        // 与上次记录的集合比较
+        if (curDevs != m_lastPortDevs) {
+            m_lastPortDevs = curDevs;
+            refreshPorts();
+        }
+    });
+    // 初始化记录（构造时 refreshPorts 已跑过一次）
+    for (const auto& info : QSerialPortInfo::availablePorts())
+        m_lastPortDevs << info.portName();
+    m_lastPortDevs.sort();
+    m_portPollTimer->start();
 }
 
 // ================= 事件（缩放 / DWM / 背景 / 关闭） =================
@@ -198,6 +225,51 @@ bool SerialTool::eventFilter(QObject* obj, QEvent* event) {
         w->installEventFilter(this);
     }
     const QEvent::Type t = event->type();
+    // 搜索历史弹窗：点击弹窗外部任意位置（含搜索输入框）时自动隐藏
+    // 仅排除左侧箭头区域（由 dropAct::triggered 处理 toggle，避免双击 Bug）
+    if (m_historyPopup && m_historyPopup->isVisible() && obj != m_historyPopup
+        && (t == QEvent::MouseButtonPress || t == QEvent::MouseButtonDblClick)) {
+        if (auto* me = static_cast<QMouseEvent*>(event)) {
+            const QPoint gpos = me->globalPosition().toPoint();
+            if (!m_historyPopup->geometry().contains(gpos)) {
+                // 检查是否点击在搜索框左侧箭头区域（LeadingPosition 图标约 20px 宽）
+                QRect entryRect = m_entrySearch->rect();
+                entryRect.moveTo(m_entrySearch->mapToGlobal(QPoint(0, 0)));
+                QRect arrowRect = entryRect;
+                arrowRect.setWidth(20);   // 箭头图标区域
+                // 点击不在箭头区域 -> 立即隐藏（搜索输入框、其他区域都隐藏）
+                if (!arrowRect.contains(gpos))
+                    m_historyPopup->hide();
+            }
+        }
+    }
+    // 选项卡下拉弹窗：popup 超出主窗口边界的部分收不到 viewport 鼠标事件
+    // （DWM 透明窗口下 WS_EX_LAYERED 穿透），改用全局拦截 + mapFromGlobal 手动换算。
+    if (m_tabPopup && m_tabPopup->isVisible()) {
+        if (t == QEvent::MouseMove) {
+            auto* me = static_cast<QMouseEvent*>(event);
+            const QPoint vp = m_tabPopup->viewport()->mapFromGlobal(me->globalPosition().toPoint());
+            const QModelIndex idx = m_tabPopup->indexAt(vp);
+            if (idx.isValid())
+                m_tabPopup->setCurrentRow(idx.row());
+        } else if (t == QEvent::MouseButtonPress || t == QEvent::MouseButtonDblClick) {
+            auto* me = static_cast<QMouseEvent*>(event);
+            const QPoint gpos = me->globalPosition().toPoint();
+            if (m_tabPopup->geometry().contains(gpos)) {
+                // 点击在弹窗内（含死区）：手动换算 viewport 坐标找行
+                const QPoint vp = m_tabPopup->viewport()->mapFromGlobal(gpos);
+                const QModelIndex idx = m_tabPopup->indexAt(vp);
+                if (idx.isValid()) {
+                    m_msTabs->setCurrentIndex(idx.row());
+                    m_tabPopup->hide();
+                }
+                return true;  // 拦截，不传给其他处理器
+            } else {
+                // 点击在弹窗外：隐藏
+                m_tabPopup->hide();
+            }
+        }
+    }
     if (obj == m_recvBox && t == QEvent::Resize) {
         positionScrollBottomBtn();
         return QWidget::eventFilter(obj, event);
@@ -362,33 +434,127 @@ void SerialTool::buildUi() {
     sbLay->setSpacing(4);
     m_entrySearch = new QLineEdit(m_searchBar);
     m_entrySearch->setPlaceholderText(QStringLiteral("查找..."));
-    m_entrySearch->setFixedWidth(150);
-    connect(m_entrySearch, &QLineEdit::textChanged, this, &SerialTool::onSearchChange);
+    m_entrySearch->setFixedWidth(160);
+    // 搜索框左侧：下拉箭头（LeadingPosition）— 点击弹出/收起搜索历史候选列表
+    auto* dropAct = m_entrySearch->addAction(
+        m_entrySearch->style()->standardIcon(QStyle::SP_ArrowDown),
+        QLineEdit::LeadingPosition);
+    dropAct->setToolTip(QStringLiteral("搜索历史"));
+    connect(dropAct, &QAction::triggered, this, [this] {
+        // toggle：可见则隐藏，不可见则展开（搜索框区域的 press 不由
+        // eventFilter 隐藏，故 release 的 triggered 状态可靠，无双击 Bug）
+        if (m_historyPopup && m_historyPopup->isVisible())
+            m_historyPopup->hide();
+        else
+            showSearchHistoryPopup();
+    });
+    // 输入框右侧 trailing ✕ 按钮（仅在有内容时显示）
+    auto* clearAct = m_entrySearch->addAction(QIcon(), QLineEdit::TrailingPosition);
+    clearAct->setVisible(false);
+    clearAct->setToolTip(QStringLiteral("清空"));
+    connect(m_entrySearch, &QLineEdit::textChanged, this, [this, clearAct](const QString& t) {
+        clearAct->setVisible(!t.isEmpty());
+        // 弹窗展开时，随输入实时过滤历史
+        if (m_historyPopup && m_historyPopup->isVisible())
+            refreshHistoryPopup();
+        onSearchChange();
+    });
+    connect(clearAct, &QAction::triggered, this, [this] {
+        m_entrySearch->clear();
+        m_entrySearch->setFocus();
+    });
+    connect(m_entrySearch, &QLineEdit::returnPressed, this, &SerialTool::commitSearchHistory);
+    // 失焦时：匹配成功则记录历史
+    connect(m_entrySearch, &QLineEdit::editingFinished, this, &SerialTool::onSearchFocusOut);
+    // 搜索历史下拉：自定义顶层列表（不抢鼠标，点击外部由全局 eventFilter 隐藏）
+    m_historyPopup = new QListWidget(this);
+    m_historyPopup->setWindowFlag(Qt::ToolTip);   // 顶层无边框、不抢鼠标焦点
+    m_historyPopup->setWindowFlag(Qt::FramelessWindowHint, false);
+    m_historyPopup->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint);
+    m_historyPopup->setFocusPolicy(Qt::NoFocus);
+    m_historyPopup->setObjectName(QStringLiteral("searchHistoryPopup"));
+    m_historyPopup->setStyleSheet(QStringLiteral(
+        "QListWidget#searchHistoryPopup{padding:4px;border-radius:4px;outline:0;}"
+        "QListWidget#searchHistoryPopup::item{padding:4px 8px;}"
+        "QListWidget#searchHistoryPopup::item:selected{background:#0078d4;color:#fff;}"));
+    m_historyPopup->hide();
+    connect(m_historyPopup, &QListWidget::itemClicked, this, [this](QListWidgetItem* it) {
+        if (!it)
+            return;
+        const QString sel = it->text();
+        // 选中某条历史 -> 刷新其时间戳（移到最前）
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        for (int i = m_searchHistory.size() - 1; i >= 0; --i) {
+            if (m_searchHistory[i].text == sel) {
+                m_searchHistory[i].timestamp = now;
+                // 移到最前（时间倒序）
+                SearchHistoryEntry e = m_searchHistory.takeAt(i);
+                m_searchHistory.prepend(e);
+                break;
+            }
+        }
+        m_entrySearch->setText(sel);
+        m_historyPopup->hide();
+        m_entrySearch->setFocus();
+        onSearchChange();
+        saveParams(true);
+    });
     sbLay->addWidget(m_entrySearch);
     m_lblSearchCount = new QLabel(QStringLiteral("0/0"), m_searchBar);
     m_lblSearchCount->setAlignment(Qt::AlignCenter);
-    m_lblSearchCount->setMinimumWidth(40);
+    m_lblSearchCount->setMinimumWidth(36);
     sbLay->addWidget(m_lblSearchCount);
-    m_btnSearchPrev = new QPushButton(QStringLiteral("▲"), m_searchBar);
-    m_btnSearchPrev->setToolTip(QStringLiteral("上一个匹配"));
+    m_btnSearchPrev = new QToolButton(m_searchBar);
+    m_btnSearchPrev->setText(QStringLiteral("▲"));
+    m_btnSearchPrev->setObjectName(QStringLiteral("searchNav"));
+    m_btnSearchPrev->setToolTip(QStringLiteral("上一个匹配 (Shift+Enter)"));
     m_btnSearchPrev->setFixedSize(22, 22);
     m_btnSearchPrev->setCursor(Qt::PointingHandCursor);
-    connect(m_btnSearchPrev, &QPushButton::clicked, this, [this] { searchJump(-1); });
+    connect(m_btnSearchPrev, &QToolButton::clicked, this, [this] { searchJump(-1); });
     sbLay->addWidget(m_btnSearchPrev);
-    m_btnSearchNext = new QPushButton(QStringLiteral("▼"), m_searchBar);
-    m_btnSearchNext->setToolTip(QStringLiteral("下一个匹配"));
+    m_btnSearchNext = new QToolButton(m_searchBar);
+    m_btnSearchNext->setText(QStringLiteral("▼"));
+    m_btnSearchNext->setObjectName(QStringLiteral("searchNav"));
+    m_btnSearchNext->setToolTip(QStringLiteral("下一个匹配 (Enter)"));
     m_btnSearchNext->setFixedSize(22, 22);
     m_btnSearchNext->setCursor(Qt::PointingHandCursor);
-    connect(m_btnSearchNext, &QPushButton::clicked, this, [this] { searchJump(1); });
+    connect(m_btnSearchNext, &QToolButton::clicked, this, [this] { searchJump(1); });
     sbLay->addWidget(m_btnSearchNext);
-    m_chkFilter = new ThemeCheckBox(QStringLiteral("筛选"), m_searchBar);
-    connect(m_chkFilter, &QCheckBox::stateChanged, this, &SerialTool::refreshView);
-    sbLay->addWidget(m_chkFilter);
-    m_btnSearchClose = new QPushButton(QStringLiteral("✕"), m_searchBar);
+
+    // —— VS Code 风格图标化开关：Cc (case) / W (whole word) / .* (regex) ——
+    auto makeOptBtn = [this, sbLay](const QString& text, const QString& tip) {
+        auto* b = new QToolButton(m_searchBar);
+        b->setText(text);
+        b->setCheckable(true);
+        b->setToolTip(tip);
+        b->setFixedSize(26, 22);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setObjectName(QStringLiteral("searchOpt"));
+        sbLay->addWidget(b);
+        return b;
+    };
+    m_btnCase = makeOptBtn(QStringLiteral("Cc"), QStringLiteral("区分大小写"));
+    connect(m_btnCase, &QToolButton::toggled, this, &SerialTool::onSearchOptionChanged);
+    m_btnRegex = makeOptBtn(QStringLiteral(".*"), QStringLiteral("正则表达式"));
+    connect(m_btnRegex, &QToolButton::toggled, this, &SerialTool::onSearchOptionChanged);
+    // 筛选：图标按钮（漏斗）— 不常点，所以也用 QToolButton
+    m_btnFilter = new QToolButton(m_searchBar);
+    m_btnFilter->setText(QStringLiteral("筛选"));
+    m_btnFilter->setCheckable(true);
+    m_btnFilter->setToolTip(QStringLiteral("只显示匹配行"));
+    m_btnFilter->setFixedSize(40, 22);
+    m_btnFilter->setCursor(Qt::PointingHandCursor);
+    m_btnFilter->setObjectName(QStringLiteral("searchOpt"));
+    connect(m_btnFilter, &QToolButton::toggled, this, &SerialTool::refreshView);
+    sbLay->addWidget(m_btnFilter);
+    // 关闭搜索条（×）
+    m_btnSearchClose = new QToolButton(m_searchBar);
+    m_btnSearchClose->setText(QStringLiteral("✕"));
+    m_btnSearchClose->setObjectName(QStringLiteral("searchClose"));
     m_btnSearchClose->setToolTip(QStringLiteral("关闭搜索 (Esc)"));
     m_btnSearchClose->setFixedSize(22, 22);
     m_btnSearchClose->setCursor(Qt::PointingHandCursor);
-    connect(m_btnSearchClose, &QPushButton::clicked, this, &SerialTool::hideSearchBar);
+    connect(m_btnSearchClose, &QToolButton::clicked, this, &SerialTool::hideSearchBar);
     sbLay->addWidget(m_btnSearchClose);
     // 悬浮于接收区右上角；后 add 的在 QGridLayout 同格中位于上层。
     // 用一层宿主 widget 加右边距（= 滚动条宽度 + 4），把搜索条左移，避免遮挡右侧滚动条
@@ -419,13 +585,75 @@ void SerialTool::buildUi() {
     scEscRecv->setContext(Qt::WidgetShortcut);
     connect(scEscRecv, &QShortcut::activated, this, &SerialTool::hideSearchBar);
 
-    // 右侧：历史/快捷命令（默认隐藏，固定宽 420）
-    m_msTabs = new QTabWidget(upper);
-    m_msTabs->setFixedWidth(420);
+    // 右侧：历史/快捷命令面板（默认隐藏，固定宽 420）
+    m_msPanel = new QWidget(upper);
+    m_msPanel->setFixedWidth(420);
+    auto* msPanelLay = new QVBoxLayout(m_msPanel);
+    msPanelLay->setContentsMargins(0, 0, 0, 0);
+    msPanelLay->setSpacing(4);
+
+    // 顶部工具栏：循环发送控件 + 新建分组（作用于当前选中的分组选项卡）
+    auto* msTop = new QWidget(m_msPanel);
+    auto* msTopLay = new QHBoxLayout(msTop);
+    msTopLay->setContentsMargins(4, 4, 4, 4);
+    msTopLay->setSpacing(4);
+    m_chkMsLoop = new ThemeCheckBox(QStringLiteral("循环发送"), msTop);
+    msTopLay->addWidget(m_chkMsLoop);
+    msTopLay->addWidget(new QLabel(QStringLiteral("间隔ms:"), msTop));
+    m_entryMsInterval = new QLineEdit(QStringLiteral("1000"), msTop);
+    m_entryMsInterval->setFixedWidth(56);
+    msTopLay->addWidget(m_entryMsInterval);
+    m_btnStartMs = new QPushButton(QStringLiteral("▶ 开始"), msTop);
+    connect(m_btnStartMs, &QPushButton::clicked, this, &SerialTool::startMsLoop);
+    msTopLay->addWidget(m_btnStartMs);
+    m_btnStopMs = new QPushButton(QStringLiteral("■ 停止"), msTop);
+    m_btnStopMs->setEnabled(false);
+    connect(m_btnStopMs, &QPushButton::clicked, this, &SerialTool::stopMsLoop);
+    msTopLay->addWidget(m_btnStopMs);
+    msTopLay->addStretch(1);
+    auto* btnNewGrp = new QPushButton(QStringLiteral("新建分组"), msTop);
+    connect(btnNewGrp, &QPushButton::clicked, this, &SerialTool::newMsGroup);
+    msTopLay->addWidget(btnNewGrp);
+    msPanelLay->addWidget(msTop);
+
+    // 选项卡：第 0 页=历史记录，随后每页=一个快捷命令分组（横向排列）
+    m_msTabs = new QTabWidget(m_msPanel);
+    m_msTabs->setUsesScrollButtons(false);  // 禁用 Qt 自带滚动箭头，改用右侧下拉箭头
     buildHistoryTab();
-    buildMsTab();
-    m_msTabs->hide();
-    upperRow->addWidget(m_msTabs);
+    // 分组选项卡由 refreshMsRows() 按 m_msGroups 构建（buildUi 末尾 loadParams 时调用）
+    msPanelLay->addWidget(m_msTabs, 1);
+    m_msPanel->hide();
+    upperRow->addWidget(m_msPanel);
+    // 切换选项卡即切换当前活动分组（tab 0=历史记录不计入分组）；并刷新活动组高亮
+    connect(m_msTabs, &QTabWidget::currentChanged, this, [this](int idx) {
+        const int g = idx - 1;
+        if (g >= 0 && g < m_msGroups.size()) {
+            m_activeMsGroup = g;
+            applyMsActiveStyle();
+        }
+    });
+    // 右上角下拉箭头：点击弹出 Qt::ToolTip 列表（和搜索历史弹窗同方案）
+    m_tabDropdownBtn = new QToolButton(m_msTabs);
+    m_tabDropdownBtn->setText(QStringLiteral("\u25BE"));  // ▾
+    m_tabDropdownBtn->setToolTip(QStringLiteral("显示选项卡列表"));
+    m_tabDropdownBtn->setObjectName(QStringLiteral("tabDropdown"));
+    m_msTabs->setCornerWidget(m_tabDropdownBtn, Qt::TopRightCorner);
+    connect(m_tabDropdownBtn, &QToolButton::clicked, this, &SerialTool::showTabDropdown);
+    // 选项卡下拉弹窗：Qt::ToolTip 顶层无边框（不抢鼠标），点击 item 由 itemClicked 处理，
+    // 点击外部由 qApp 全局 eventFilter 隐藏（和 m_historyPopup 同机制）
+    m_tabPopup = new QListWidget(this);
+    m_tabPopup->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint);
+    m_tabPopup->setFocusPolicy(Qt::NoFocus);
+    m_tabPopup->setObjectName(QStringLiteral("tabPopup"));
+    m_tabPopup->hide();
+    connect(m_tabPopup, &QListWidget::itemClicked, this, [this](QListWidgetItem* it) {
+        if (!it)
+            return;
+        const int row = m_tabPopup->row(it);
+        if (row >= 0 && row < m_msTabs->count())
+            m_msTabs->setCurrentIndex(row);
+        m_tabPopup->hide();
+    });
 
     // 接收区按钮行
     auto* rt = new QHBoxLayout;
@@ -694,50 +922,7 @@ void SerialTool::buildHistoryTab() {
     m_histList->setObjectName(QStringLiteral("histList"));
     connect(m_histList, &QListWidget::itemDoubleClicked, this, &SerialTool::histLoad);
     lay->addWidget(m_histList, 1);
-    m_msTabs->addTab(w, QStringLiteral("历史记录"));
-}
-
-void SerialTool::buildMsTab() {
-    auto* w = new QWidget(m_msTabs);
-    auto* lay = new QVBoxLayout(w);
-    auto* bar = new QHBoxLayout;
-    auto* btn = new QPushButton(QStringLiteral("\uFF0B 新建"), w);
-    connect(btn, &QPushButton::clicked, this, &SerialTool::newMsEntry);
-    bar->addWidget(btn);
-    auto* line = new QFrame(w);
-    line->setFrameShape(QFrame::VLine);
-    line->setFrameShadow(QFrame::Sunken);
-    bar->addWidget(line);
-    m_chkMsLoop = new ThemeCheckBox(QStringLiteral("循环发送"), w);
-    bar->addWidget(m_chkMsLoop);
-    bar->addWidget(new QLabel(QStringLiteral("间隔ms:"), w));
-    m_entryMsInterval = new QLineEdit(QStringLiteral("1000"), w);
-    m_entryMsInterval->setFixedWidth(56);
-    bar->addWidget(m_entryMsInterval);
-    m_btnStartMs = new QPushButton(QStringLiteral("\u25B6 开始"), w);
-    connect(m_btnStartMs, &QPushButton::clicked, this, &SerialTool::startMsLoop);
-    bar->addWidget(m_btnStartMs);
-    m_btnStopMs = new QPushButton(QStringLiteral("\u25A0 停止"), w);
-    m_btnStopMs->setEnabled(false);
-    connect(m_btnStopMs, &QPushButton::clicked, this, &SerialTool::stopMsLoop);
-    bar->addWidget(m_btnStopMs);
-    bar->addStretch(1);
-    lay->addLayout(bar);
-
-    m_lblMsHint = new QLabel(
-        QStringLiteral("HEX  发送内容（可编辑）            按钮（右键改名 / 点发）"), w);
-    lay->addWidget(m_lblMsHint);
-
-    m_msScroll = new QScrollArea(w);
-    m_msScroll->setWidgetResizable(true);
-    m_msInner = new QWidget;
-    m_msRows = new QVBoxLayout(m_msInner);
-    m_msRows->setContentsMargins(2, 2, 2, 2);
-    m_msRows->setSpacing(2);
-    m_msRows->addStretch(1);
-    m_msScroll->setWidget(m_msInner);
-    lay->addWidget(m_msScroll, 1);
-    m_msTabs->addTab(w, QStringLiteral("快捷命令"));
+    m_msTabs->addTab(w, QStringLiteral("历史"));
 }
 
 // ================= 主题 =================
@@ -750,8 +935,6 @@ void SerialTool::applyTheme(const QString& themeName) {
     if (QApplication* app = qApp)
         app->setStyleSheet(sjj::buildQss(m_themeC));
     m_titleBar->applyTheme(m_themeC, m_theme);
-    m_lblMsHint->setStyleSheet(
-        QStringLiteral("color:%1;").arg(m_themeC.value(QStringLiteral("text_secondary"))));
     m_lblCsResult->setStyleSheet(
         QStringLiteral("color:%1;font-weight:bold;")
             .arg(m_themeC.value(QStringLiteral("err_color"))));
@@ -776,6 +959,7 @@ void SerialTool::applyTheme(const QString& themeName) {
     updateChecksumHighlight();
     refreshStatus();
     refreshView();   // 切主题后强制重建接收区（按新主题色重新渲染已有文字）
+    refreshMsRows(); // 用新主题色重建分组卡片边框/背景
     update();   // 立即触发 paintEvent 重画窗口背景
 }
 
@@ -1458,7 +1642,7 @@ void SerialTool::appendToView(QVector<Record>& recs) {
             m_records.removeFirst();
             delLines += renderRecord(r).count(QLatin1Char('\n'));
         }
-        if (m_chkFilter->isChecked()) {
+        if (m_btnFilter->isChecked()) {
             refreshView();
             return;
         }
@@ -1466,11 +1650,11 @@ void SerialTool::appendToView(QVector<Record>& recs) {
             deleteTopLines(delLines);
     }
     const QString needle = m_entrySearch->text();
-    if (m_chkFilter->isChecked() && !needle.isEmpty()) {
+    if (m_btnFilter->isChecked() && !needle.isEmpty()) {
         QVector<Record> filtered;
         filtered.reserve(recs.size());
         for (const auto& r : recs) {
-            if (renderRecord(r).toLower().contains(needle.toLower()))
+            if (searchMatch(renderRecord(r)))
                 filtered.append(r);
         }
         if (filtered.isEmpty())
@@ -1524,8 +1708,7 @@ void SerialTool::deleteTopLines(int n) {
 
 void SerialTool::refreshView() {
     ScrollGuard guard(m_programScroll);
-    const QString needle = m_entrySearch->text();
-    const bool filt = m_chkFilter->isChecked();
+    const bool filt = m_btnFilter->isChecked();
     const QColor accent(m_themeC.value(QStringLiteral("accent")));
     const QColor editFg(m_themeC.value(QStringLiteral("edit_fg")));
     m_txtRecv->blockSignals(true);
@@ -1537,7 +1720,7 @@ void SerialTool::refreshView() {
     cursor.beginEditBlock();
     for (const auto& r : m_records) {
         const QString rendered = renderRecord(r);
-        if (filt && !needle.isEmpty() && !rendered.toLower().contains(needle.toLower()))
+        if (filt && !searchMatch(rendered))
             continue;
         const auto parts = renderParts(r);
         if (!parts.first.isEmpty()) {
@@ -1571,8 +1754,12 @@ QString SerialTool::accentHex() const {
 void SerialTool::applyHighlight() {
     const QString needle = m_entrySearch->text();
     m_searchHits.clear();
+    m_searchHitLens.clear();
     QList<QTextEdit::ExtraSelection> sels;
     if (!needle.isEmpty()) {
+        const bool useRegex = m_btnRegex->isChecked();
+        // Cc 亮=区分大小写；不亮=大小写不敏感
+        const bool caseSensitive = m_btnCase->isChecked();
         // 普通匹配：黄色底黑字
         QTextCharFormat fmt;
         fmt.setBackground(QColor(QStringLiteral("#ffe066")));
@@ -1584,16 +1771,61 @@ void SerialTool::applyHighlight() {
         QTextDocument* doc = m_txtRecv->document();
         QTextCursor cursor(doc);
         int idx = 0;
-        while (true) {
-            cursor = doc->find(needle, cursor);
-            if (cursor.isNull())
-                break;
-            m_searchHits.append(cursor.selectionStart());
-            QTextEdit::ExtraSelection sel;
-            sel.format = (idx == m_searchIndex) ? curFmt : fmt;
-            sel.cursor = cursor;
-            sels.append(sel);
-            ++idx;
+        if (useRegex) {
+            QRegularExpression re(needle);
+            if (!caseSensitive)
+                re.setPatternOptions(QRegularExpression::CaseInsensitiveOption);
+            if (!re.isValid()) {
+                // 正则非法：提示并返回（不渲染高亮）
+                if (m_lblSearchCount) {
+                    m_lblSearchCount->setText(QStringLiteral("正则✗"));
+                    m_lblSearchCount->setStyleSheet(
+                        QStringLiteral("color:#d22020;font-weight:bold;"));
+                }
+                m_txtRecv->setExtraSelections(sels);
+                return;
+            }
+            while (true) {
+                cursor = doc->find(re, cursor);
+                if (cursor.isNull())
+                    break;
+                const int matchStart = cursor.selectionStart();
+                const int len = cursor.selectionEnd() - matchStart;
+                // 防止零长度匹配（如 "123|" 能匹配空串）导致无限循环
+                if (len == 0) {
+                    // 若已在文档末尾，推进后仍原地踏步 -> 死循环，必须 break
+                    const int docEnd = doc->characterCount() - 1;
+                    if (matchStart >= docEnd)
+                        break;
+                    // 推进 1 字符继续搜索，跳过空匹配
+                    cursor.setPosition(matchStart + 1);
+                    continue;
+                }
+                m_searchHits.append(matchStart);
+                m_searchHitLens.append(len);
+                QTextEdit::ExtraSelection sel;
+                sel.format = (idx == m_searchIndex) ? curFmt : fmt;
+                sel.cursor = cursor;
+                sels.append(sel);
+                ++idx;
+            }
+        } else {
+            // 普通模式：大小写标志
+            QTextDocument::FindFlags flags = QTextDocument::FindFlag(0);
+            if (caseSensitive)
+                flags |= QTextDocument::FindCaseSensitively;
+            while (true) {
+                cursor = doc->find(needle, cursor, flags);
+                if (cursor.isNull())
+                    break;
+                m_searchHits.append(cursor.selectionStart());
+                m_searchHitLens.append(needle.length());
+                QTextEdit::ExtraSelection sel;
+                sel.format = (idx == m_searchIndex) ? curFmt : fmt;
+                sel.cursor = cursor;
+                sels.append(sel);
+                ++idx;
+            }
         }
         // 索引越界保护（文本追加/裁剪后位置失效时重置）
         if (m_searchIndex >= m_searchHits.size() || m_searchIndex < 0)
@@ -1608,6 +1840,9 @@ void SerialTool::applyHighlight() {
 void SerialTool::updateSearchCountLabel() {
     if (!m_lblSearchCount)
         return;
+    // 复位样式（清除此前"正则✗"的红色），恢复主题色
+    m_lblSearchCount->setStyleSheet(
+        QStringLiteral("color:%1;").arg(m_themeC.value(QStringLiteral("text_secondary"))));
     const QString needle = m_entrySearch->text();
     const int total = m_searchHits.size();
     if (needle.isEmpty() || total == 0) {
@@ -1634,11 +1869,12 @@ void SerialTool::searchJump(int delta) {
         idx = (m_searchIndex + delta + total) % total;
     }
     m_searchIndex = idx;
-    // 跳转并滚动到匹配位置
+    // 跳转并滚动到匹配位置（用实际匹配长度，正则时 != needle 长度）
     QTextCursor cursor(m_txtRecv->document());
     cursor.setPosition(m_searchHits[idx]);
-    cursor.setPosition(m_searchHits[idx] + m_entrySearch->text().length(),
-                       QTextCursor::KeepAnchor);
+    const int len = (idx < m_searchHitLens.size()) ? m_searchHitLens[idx]
+                                                    : m_entrySearch->text().length();
+    cursor.setPosition(m_searchHits[idx] + len, QTextCursor::KeepAnchor);
     m_txtRecv->setTextCursor(cursor);
     m_txtRecv->ensureCursorVisible();
     applyHighlight();   // 刷新当前匹配高亮与计数
@@ -1653,23 +1889,31 @@ void SerialTool::toggleSearchBar() {
     }
     m_searchBar->show();
     m_searchBar->raise();
-    // 接收区有选中文字 → 自动填入搜索框（立即触发搜索）
+    // 接收区有选中文字 → 优先填入（覆盖上次记忆）
     QString sel = m_txtRecv->textCursor().selectedText();
     sel.replace(QChar(0x2029), QLatin1Char('\n'));   // 段落分隔符→换行
     sel.replace(QChar(0x2028), QLatin1Char('\n'));   // 行分隔符→换行
     sel = sel.trimmed();
-    if (!sel.isEmpty() && sel != m_entrySearch->text()) {
+    if (!sel.isEmpty()) {
+        m_searchText = sel;
         m_entrySearch->setText(sel);
         m_searchIndex = -1;
         refreshView();   // 立即按新词高亮，不等 200ms 防抖
+    } else {
+        // 否则恢复上一次搜索词（关闭时记忆，可能为空字符串）
+        m_entrySearch->setText(m_searchText);
     }
     m_entrySearch->setFocus();
-    m_entrySearch->selectAll();   // 便于直接输入新词覆盖
+    // 光标移到末尾（不选中），确保“保留上次值”可见
+    m_entrySearch->setCursorPosition(m_entrySearch->text().length());
 }
 
 void SerialTool::hideSearchBar() {
     if (!m_searchBar || !m_searchBar->isVisible())
         return;
+    m_searchText = m_entrySearch->text();   // 记录本次搜索词，供下次重开恢复
+    if (m_historyPopup)
+        m_historyPopup->hide();
     m_searchBar->hide();
     // 清空搜索状态：移除高亮、复位计数，避免残留遮住接收区
     m_searchHits.clear();
@@ -1693,6 +1937,21 @@ void SerialTool::onRecvContextMenu(const QPoint& pos) {
     connect(actClear, &QAction::triggered, this, &SerialTool::clearRecv);
     auto* actSave = menu.addAction(QStringLiteral("保存txt"));
     connect(actSave, &QAction::triggered, this, &SerialTool::saveRecv);
+    menu.addSeparator();
+
+    // 复制：选中文字时复制选中，未选中时复制全部
+    auto* actCopy = menu.addAction(QStringLiteral("复制"));
+    connect(actCopy, &QAction::triggered, this, [this] {
+        QString sel = m_txtRecv->textCursor().selectedText();
+        if (!sel.isEmpty())
+            QApplication::clipboard()->setText(sel);
+        else
+            QApplication::clipboard()->setText(m_txtRecv->toPlainText());
+    });
+    auto* actCopyAll = menu.addAction(QStringLiteral("全部复制"));
+    connect(actCopyAll, &QAction::triggered, this, [this] {
+        QApplication::clipboard()->setText(m_txtRecv->toPlainText());
+    });
     menu.addSeparator();
 
     auto* actHex = menu.addAction(QStringLiteral("HEX显示"));
@@ -1745,6 +2004,95 @@ void SerialTool::onSearchChange() {
     m_searchTimer->setSingleShot(true);
     connect(m_searchTimer, &QTimer::timeout, this, &SerialTool::refreshView);
     m_searchTimer->start(200);
+}
+
+void SerialTool::onSearchOptionChanged() {
+    // 大小写敏感(Cc) 与 正则(.*) 互斥：开启其一即关闭另一（blockSignals 防递归触发）
+    auto* src = qobject_cast<QToolButton*>(sender());
+    if (src == m_btnRegex && m_btnRegex->isChecked()) {
+        m_btnCase->blockSignals(true);
+        m_btnCase->setChecked(false);
+        m_btnCase->blockSignals(false);
+    } else if (src == m_btnCase && m_btnCase->isChecked()) {
+        m_btnRegex->blockSignals(true);
+        m_btnRegex->setChecked(false);
+        m_btnRegex->blockSignals(false);
+    }
+    refreshView();
+}
+
+void SerialTool::commitSearchHistory() {
+    const QString t = m_entrySearch->text().trimmed();
+    if (t.isEmpty())
+        return;
+    // 回车时：不管是否匹配成功都记录
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    // 去重：移除同文本旧条目
+    for (int i = m_searchHistory.size() - 1; i >= 0; --i) {
+        if (m_searchHistory[i].text == t)
+            m_searchHistory.removeAt(i);
+    }
+    m_searchHistory.prepend({t, now});
+    const int cap = 30;
+    while (m_searchHistory.size() > cap)
+        m_searchHistory.removeLast();
+    saveParams(true);
+}
+
+void SerialTool::onSearchFocusOut() {
+    // 失焦时：仅匹配成功才记录
+    if (!m_searchHits.isEmpty())
+        commitSearchHistory();
+}
+
+void SerialTool::refreshHistoryPopup() {
+    if (!m_historyPopup)
+        return;
+    const QString needle = m_entrySearch->text();
+    m_historyPopup->clear();
+    for (const auto& h : m_searchHistory) {
+        if (needle.isEmpty() || h.text.contains(needle, Qt::CaseInsensitive))
+            m_historyPopup->addItem(h.text);
+    }
+}
+
+void SerialTool::showSearchHistoryPopup() {
+    if (!m_historyPopup || m_searchHistory.isEmpty())
+        return;
+    // 点击箭头时展示全量历史（不过滤），输入时才实时过滤
+    m_historyPopup->clear();
+    for (const auto& h : m_searchHistory)
+        m_historyPopup->addItem(h.text);
+    if (m_historyPopup->count() == 0) {
+        m_historyPopup->hide();
+        return;
+    }
+    const QPoint pos = m_entrySearch->mapToGlobal(
+        QPoint(0, m_entrySearch->height() + 2));
+    m_historyPopup->setFixedWidth(m_entrySearch->width());
+    const int hgt = qMin(m_historyPopup->sizeHintForRow(0) * m_historyPopup->count() + 8, 260);
+    m_historyPopup->setFixedHeight(hgt);
+    m_historyPopup->move(pos);
+    m_historyPopup->show();
+}
+
+bool SerialTool::searchMatch(const QString& text) const {
+    const QString needle = m_entrySearch->text();
+    if (needle.isEmpty())
+        return true;
+    const bool useRegex = m_btnRegex->isChecked();
+    const bool caseSensitive = m_btnCase->isChecked();
+    if (useRegex) {
+        QRegularExpression re(needle);
+        if (!caseSensitive)
+            re.setPatternOptions(QRegularExpression::CaseInsensitiveOption);
+        if (!re.isValid())
+            return false;
+        return re.match(text).hasMatch();
+    }
+    // 普通模式：大小写组合
+    const Qt::CaseSensitivity cs = caseSensitive ? Qt::CaseSensitive : Qt::CaseInsensitive;
+    return text.contains(needle, cs);
 }
 
 void SerialTool::onRecvScroll(int value) {
@@ -2060,52 +2408,231 @@ void SerialTool::timerSendTick() {
 // ================= 多字符串发送 =================
 
 void SerialTool::refreshMsRows() {
-    for (auto& ws : m_msRowWidgets) {
-        for (auto* w : ws) {
-            w->setParent(nullptr);
+    // 整体重建分组选项卡（保留第 0 页「历史记录」）：确保改名 / 增删分组 / 命令状态一致
+    // block currentChanged：removeTab 过程中 Qt 自动切 tab 会触发 currentChanged
+    // 把 m_activeMsGroup 改成别的值，导致新建分组后定位错误。
+    m_msTabs->blockSignals(true);
+    while (m_msTabs->count() > 1) {
+        QWidget* w = m_msTabs->widget(m_msTabs->count() - 1);
+        m_msTabs->removeTab(m_msTabs->count() - 1);
+        if (w)
             w->deleteLater();
-        }
     }
-    m_msRowWidgets.clear();
-    for (int i = 0; i < m_msEntries.size(); ++i) {
-        auto* row = new QHBoxLayout;
-        row->setSpacing(2);
-        auto* chk = new ThemeCheckBox(QStringLiteral("HEX"));
-        chk->setThemeColors(m_themeC);
-        chk->setChecked(m_msEntries[i].hex);
-        connect(chk, &QCheckBox::toggled, this,
-                [this, i](bool v) { msSetHex(i, v); });
-        row->addWidget(chk);
-        auto* ent = new QLineEdit(m_msEntries[i].content);
-        connect(ent, &QLineEdit::textChanged, this,
-                [this, i](const QString& t) { msSetContent(i, t); });
-        row->addWidget(ent, 1);
-        auto* btn = new QPushButton(m_msEntries[i].label);
-        btn->setFixedWidth(96);
-        connect(btn, &QPushButton::clicked, this, [this, i] { sendMsEntry(i); });
-        btn->setContextMenuPolicy(Qt::CustomContextMenu);
-        connect(btn, &QWidget::customContextMenuRequested, this,
-                [this, i](const QPoint&) { renameMsEntry(i); });
-        row->addWidget(btn);
-        auto* xbtn = new QPushButton(QStringLiteral("\u2715"));
-        xbtn->setFixedWidth(28);
-        connect(xbtn, &QPushButton::clicked, this, [this, i] { deleteMsEntry(i); });
-        row->addWidget(xbtn);
-        m_msRows->insertLayout(m_msRows->count() - 1, row);
-        m_msRowWidgets.append({chk, ent, btn, xbtn});
+
+    if (m_activeMsGroup < 0 || m_activeMsGroup >= m_msGroups.size())
+        m_activeMsGroup = m_msGroups.isEmpty() ? 0 : m_msGroups.size() - 1;
+
+    for (int g = 0; g < m_msGroups.size(); ++g) {
+        MsGroup& grp = m_msGroups[g];
+        auto* page = new QWidget(m_msTabs);
+        auto* lay = new QVBoxLayout(page);
+        lay->setContentsMargins(4, 4, 4, 4);
+        lay->setSpacing(4);
+
+        // ---- 分组头：组名 / 加命令 / 删组 ----
+        auto* header = new QHBoxLayout;
+        header->setSpacing(4);
+        auto* nameEdit = new QLineEdit(grp.name);
+        nameEdit->setPlaceholderText(QStringLiteral("分组名（如 测零 / 防坠）"));
+        nameEdit->setMinimumWidth(80);
+        connect(nameEdit, &QLineEdit::textChanged, this,
+                [this, g](const QString& t) { renameMsGroup(g, t); });
+        connect(nameEdit, &QLineEdit::editingFinished, this,
+                [this, g] { setActiveMsGroup(g); });
+        header->addWidget(nameEdit, 1);
+        auto* addCmd = new QPushButton(QStringLiteral("\uFF0B 命令"), page);
+        addCmd->setFixedWidth(72);
+        addCmd->setToolTip(QStringLiteral("在本组新增命令"));
+        connect(addCmd, &QPushButton::clicked, this, [this, g] {
+            m_activeMsGroup = g;
+            newMsEntry();
+        });
+        header->addWidget(addCmd);
+        auto* delGrp = new QPushButton(QStringLiteral("\u2715 删组"), page);
+        delGrp->setFixedWidth(60);
+        delGrp->setToolTip(QStringLiteral("删除该分组"));
+        connect(delGrp, &QPushButton::clicked, this, [this, g] { deleteMsGroup(g); });
+        header->addWidget(delGrp);
+        lay->addLayout(header);
+
+        // ---- 组内命令 ----
+        auto* scroll = new QScrollArea(page);
+        scroll->setWidgetResizable(true);
+        auto* inner = new QWidget;
+        auto* rows = new QVBoxLayout(inner);
+        rows->setContentsMargins(2, 2, 2, 2);
+        rows->setSpacing(2);
+        rows->addStretch(1);
+        for (int i = 0; i < grp.entries.size(); ++i) {
+            const int gi = g, ei = i;
+            auto* row = new QHBoxLayout;
+            row->setSpacing(2);
+            auto* chk = new ThemeCheckBox(QStringLiteral("HEX"), page);
+            chk->setThemeColors(m_themeC);
+            chk->setChecked(grp.entries[i].hex);
+            connect(chk, &QCheckBox::toggled, this,
+                    [this, gi, ei](bool v) { msSetHex(gi, ei, v); });
+            row->addWidget(chk);
+            auto* ent = new QLineEdit(grp.entries[i].content);
+            connect(ent, &QLineEdit::textChanged, this,
+                    [this, gi, ei](const QString& t) { msSetContent(gi, ei, t); });
+            row->addWidget(ent, 1);
+            auto* btn = new QPushButton(grp.entries[i].label);
+            btn->setFixedWidth(96);
+            connect(btn, &QPushButton::clicked, this, [this, gi, ei] { sendMsEntry(gi, ei); });
+            btn->setContextMenuPolicy(Qt::CustomContextMenu);
+            connect(btn, &QWidget::customContextMenuRequested, this,
+                    [this, gi, ei](const QPoint&) { renameMsEntry(gi, ei); });
+            row->addWidget(btn);
+            auto* xbtn = new QPushButton(QStringLiteral("\u2715"), page);
+            xbtn->setFixedWidth(28);
+            connect(xbtn, &QPushButton::clicked, this, [this, gi, ei] { deleteMsEntry(gi, ei); });
+            row->addWidget(xbtn);
+            rows->insertLayout(rows->count() - 1, row);
+        }
+        scroll->setWidget(inner);
+        lay->addWidget(scroll, 1);
+
+        m_msTabs->addTab(page, grp.name);
+    }
+    // 选中当前活动分组选项卡，并刷新活动组高亮
+    if (m_msGroups.isEmpty())
+        m_msTabs->setCurrentIndex(0);
+    else
+        m_msTabs->setCurrentIndex(m_activeMsGroup + 1);
+    applyMsActiveStyle();
+    // 恢复信号，手动触发一次 currentChanged 同步状态
+    m_msTabs->blockSignals(false);
+}
+
+void SerialTool::applyMsActiveStyle() {
+    QTabBar* bar = m_msTabs->tabBar();
+    if (!bar)
+        return;
+    const QString accent = m_themeC.value(QStringLiteral("accent"));
+    const QString normal = m_themeC.value(QStringLiteral("text_secondary"));
+    const QColor accentCol(accent);
+    const QColor normalCol(normal);
+    for (int i = 1; i < m_msTabs->count(); ++i) {
+        const int g = i - 1;
+        const bool active = (g == m_activeMsGroup);
+        // 活动分组选项卡：主题强调色文字；非活动：次级文字色
+        bar->setTabTextColor(i, active ? accentCol : normalCol);
     }
 }
 
-void SerialTool::msSetHex(int i, bool val) {
-    if (i >= 0 && i < m_msEntries.size()) {
-        m_msEntries[i].hex = val;
+void SerialTool::cycleMsTab(int dir) {
+    // 选项卡按顺序切换
+    const int n = m_msTabs->count();
+    if (n <= 1)
+        return;
+    int idx = m_msTabs->currentIndex() + dir;
+    if (idx < 0)
+        idx = n - 1;          // 循环到末尾
+    else if (idx >= n)
+        idx = 0;              // 循环到开头
+    m_msTabs->setCurrentIndex(idx);
+}
+
+void SerialTool::showTabDropdown() {
+    if (!m_tabPopup)
+        return;
+    const int n = m_msTabs->count();
+    if (n == 0)
+        return;
+    m_tabPopup->clear();
+    for (int i = 0; i < n; ++i) {
+        QString label = m_msTabs->tabText(i);
+        if (label.isEmpty())
+            label = QStringLiteral("Tab %1").arg(i);
+        auto* item = new QListWidgetItem(label);
+        if (i == m_msTabs->currentIndex())
+            item->setSelected(true);
+        m_tabPopup->addItem(item);
+    }
+    const QPoint globalPos = m_tabDropdownBtn->mapToGlobal(QPoint(0, m_tabDropdownBtn->height()));
+    m_tabPopup->setFixedWidth(qMax(120, m_tabDropdownBtn->width() * 4));
+    const int hgt = qMin(m_tabPopup->sizeHintForRow(0) * n + 8, 300);
+    m_tabPopup->setFixedHeight(hgt);
+    m_tabPopup->move(globalPos);
+    m_tabPopup->show();
+}
+
+void SerialTool::hideTabPopup() {
+    if (m_tabPopup)
+        m_tabPopup->hide();
+}
+
+void SerialTool::setActiveMsGroup(int g) {
+    if (g < 0 || g >= m_msGroups.size())
+        return;
+    m_activeMsGroup = g;
+    if (m_msTabs->count() > g + 1)
+        m_msTabs->setCurrentIndex(g + 1);
+    applyMsActiveStyle();
+}
+
+void SerialTool::newMsGroup() {
+    MsGroup g;
+    g.name = QStringLiteral("分组%1").arg(m_msGroups.size() + 1);
+    m_msGroups.append(g);
+    m_activeMsGroup = m_msGroups.size() - 1;
+    refreshMsRows();
+    saveParams(true);
+}
+
+void SerialTool::deleteMsGroup(int g) {
+    if (g < 0 || g >= m_msGroups.size())
+        return;
+    const int n = m_msGroups[g].entries.size();
+    if (n == 0 || QMessageBox::question(this, QStringLiteral("删除分组"),
+            QStringLiteral("确定删除分组「%1」及其 %2 条命令？")
+                .arg(m_msGroups[g].name, QString::number(n)),
+            QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+        m_msGroups.removeAt(g);
+        if (m_activeMsGroup >= m_msGroups.size())
+            m_activeMsGroup = m_msGroups.isEmpty() ? 0 : m_msGroups.size() - 1;
+        refreshMsRows();
+        saveParams(true);
+    }
+}
+
+void SerialTool::renameMsGroup(int g, const QString& name) {
+    if (g < 0 || g >= m_msGroups.size())
+        return;
+    m_msGroups[g].name = name;
+    // 实时更新对应选项卡标题（不重建，避免输入框失焦）
+    if (g + 1 < m_msTabs->count())
+        m_msTabs->setTabText(g + 1, name.isEmpty() ? QStringLiteral("分组") : name);
+    scheduleQuickCmdSave();   // 防抖保存（不重建，避免输入框失焦）
+}
+
+void SerialTool::newMsEntry() {
+    if (m_msGroups.isEmpty()) {
+        MsGroup g;
+        g.name = QStringLiteral("分组1");
+        m_msGroups.append(g);
+    }
+    if (m_activeMsGroup < 0 || m_activeMsGroup >= m_msGroups.size())
+        m_activeMsGroup = m_msGroups.size() - 1;
+    const int g = m_activeMsGroup;
+    MsEntry e;
+    e.label = QStringLiteral("发送%1").arg(m_msGroups[g].entries.size() + 1);
+    m_msGroups[g].entries.append(e);
+    refreshMsRows();
+    saveParams(true);
+}
+
+void SerialTool::msSetHex(int g, int i, bool val) {
+    if (g >= 0 && g < m_msGroups.size() && i >= 0 && i < m_msGroups[g].entries.size()) {
+        m_msGroups[g].entries[i].hex = val;
         saveParams(true);   // 快捷命令变化 → 立即保存（触发其他实例同步）
     }
 }
 
-void SerialTool::msSetContent(int i, const QString& t) {
-    if (i >= 0 && i < m_msEntries.size()) {
-        m_msEntries[i].content = t;
+void SerialTool::msSetContent(int g, int i, const QString& t) {
+    if (g >= 0 && g < m_msGroups.size() && i >= 0 && i < m_msGroups[g].entries.size()) {
+        m_msGroups[g].entries[i].content = t;
         scheduleQuickCmdSave();   // 内容编辑防抖保存（300ms）
     }
 }
@@ -2116,7 +2643,7 @@ void SerialTool::scheduleQuickCmdSave() {
         m_cfgSaveTimer->start(300);
 }
 
-// 配置文件被其他实例修改：仅同步快捷命令（ms_entries），其他配置不动
+// 配置文件被其他实例修改：仅同步快捷命令（ms_groups），其他配置不动
 void SerialTool::onConfigFileChanged(const QString&) {
     QFile f(configPath());
     if (!f.open(QIODevice::ReadOnly))
@@ -2125,67 +2652,76 @@ void SerialTool::onConfigFileChanged(const QString&) {
     f.close();
     if (!doc.isObject())
         return;
-    const QJsonArray arr = doc.object().value(QStringLiteral("ms_entries")).toArray();
+    const QJsonArray arr = doc.object().value(QStringLiteral("ms_groups")).toArray();
     // 与当前内容比较：相同（自身保存触发/未变化）则跳过，避免无谓刷新与回环
     if (QJsonDocument(arr).toJson(QJsonDocument::Compact)
-        == QJsonDocument(msEntriesToData()).toJson(QJsonDocument::Compact))
+        == QJsonDocument(msGroupsToData()).toJson(QJsonDocument::Compact))
         return;
-    // 应用文件中的快捷命令
-    m_msEntries.clear();
-    for (const QJsonValue& v : arr) {
-        const QJsonObject e = v.toObject();
-        MsEntry me;
-        me.hex = e.value(QStringLiteral("hex")).toBool(false);
-        me.content = e.value(QStringLiteral("content")).toString();
-        me.label = e.value(QStringLiteral("label")).toString(QStringLiteral("发送"));
-        if (me.label.isEmpty())
-            me.label = QStringLiteral("发送");
-        m_msEntries.append(me);
+    // 应用文件中的快捷命令（分组）
+    m_msGroups = msGroupsFromArray(arr);
+    if (m_activeMsGroup >= m_msGroups.size())
+        m_activeMsGroup = m_msGroups.isEmpty() ? 0 : m_msGroups.size() - 1;
+    refreshMsRows();
+}
+
+QVector<MsGroup> SerialTool::msGroupsFromArray(const QJsonArray& arr) const {
+    QVector<MsGroup> groups;
+    for (const QJsonValue& gv : arr) {
+        const QJsonObject go = gv.toObject();
+        MsGroup grp;
+        grp.name = go.value(QStringLiteral("name")).toString(QStringLiteral("分组"));
+        if (grp.name.isEmpty())
+            grp.name = QStringLiteral("分组");
+        grp.collapsed = go.value(QStringLiteral("collapsed")).toBool(false);
+        const QJsonArray ea = go.value(QStringLiteral("entries")).toArray();
+        for (const QJsonValue& ev : ea) {
+            const QJsonObject eo = ev.toObject();
+            MsEntry me;
+            me.hex = eo.value(QStringLiteral("hex")).toBool(false);
+            me.content = eo.value(QStringLiteral("content")).toString();
+            me.label = eo.value(QStringLiteral("label")).toString(QStringLiteral("发送"));
+            if (me.label.isEmpty())
+                me.label = QStringLiteral("发送");
+            grp.entries.append(me);
+        }
+        groups.append(grp);
     }
-    refreshMsRows();
+    return groups;
 }
 
-void SerialTool::newMsEntry() {
-    const int idx = m_msEntries.size() + 1;
-    MsEntry e;
-    e.hex = false;
-    e.label = QStringLiteral("发送%1").arg(idx);
-    m_msEntries.append(e);
-    refreshMsRows();
-    saveParams(true);   // 同步到其他实例
-}
-
-void SerialTool::deleteMsEntry(int i) {
-    if (i >= 0 && i < m_msEntries.size()) {
-        m_msEntries.removeAt(i);
+void SerialTool::deleteMsEntry(int g, int i) {
+    if (g >= 0 && g < m_msGroups.size() && i >= 0 && i < m_msGroups[g].entries.size()) {
+        m_msGroups[g].entries.removeAt(i);
         refreshMsRows();
         saveParams(true);   // 同步到其他实例
     }
 }
 
-void SerialTool::renameMsEntry(int i) {
-    if (i < 0 || i >= m_msEntries.size())
+void SerialTool::renameMsEntry(int g, int i) {
+    if (g < 0 || g >= m_msGroups.size() || i < 0 || i >= m_msGroups[g].entries.size())
         return;
     bool ok = false;
     const QString newLabel = QInputDialog::getText(
         this, QStringLiteral("修改按钮文字"),
-        QStringLiteral("请输入第 %1 行的按钮显示文字：").arg(i + 1),
-        QLineEdit::Normal, m_msEntries[i].label, &ok);
+        QStringLiteral("请输入第 %1 组第 %2 行的按钮显示文字：").arg(g + 1).arg(i + 1),
+        QLineEdit::Normal, m_msGroups[g].entries[i].label, &ok);
     if (ok && !newLabel.trimmed().isEmpty()) {
-        m_msEntries[i].label = newLabel.trimmed();
+        m_msGroups[g].entries[i].label = newLabel.trimmed();
         refreshMsRows();
         saveParams(true);   // 同步到其他实例
     }
 }
 
-void SerialTool::sendMsEntry(int i) {
+void SerialTool::sendMsEntry(int g, int i) {
     if (!m_ser || !m_ser->isOpen()) {
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请先打开串口"));
         return;
     }
-    if (i < 0 || i >= m_msEntries.size())
+    if (g < 0 || g >= m_msGroups.size() || i < 0 || i >= m_msGroups[g].entries.size())
         return;
-    const MsEntry& e = m_msEntries[i];
+    m_activeMsGroup = g;
+    applyMsActiveStyle();
+    const MsEntry& e = m_msGroups[g].entries[i];
     const QString raw = e.content;
     if (raw.isEmpty())
         return;
@@ -2196,7 +2732,7 @@ void SerialTool::sendMsEntry(int i) {
         data = sjj::parseHexString(raw, ok, err);
         if (!ok) {
             QMessageBox::critical(this, QStringLiteral("HEX错误"),
-                                  QStringLiteral("第 %1 行 %2").arg(i + 1).arg(err));
+                                  QStringLiteral("第 %1 组第 %2 行 %3").arg(g + 1).arg(i + 1).arg(err));
             return;
         }
     } else {
@@ -2221,9 +2757,17 @@ void SerialTool::startMsLoop() {
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请先打开串口"));
         return;
     }
-    if (m_msEntries.isEmpty()) {
+    if (m_msGroups.isEmpty()) {
         QMessageBox::information(this, QStringLiteral("提示"),
-                                 QStringLiteral("列表为空，请先新建条目"));
+                                 QStringLiteral("还没有分组，请先新建分组与命令"));
+        return;
+    }
+    if (m_activeMsGroup < 0 || m_activeMsGroup >= m_msGroups.size())
+        m_activeMsGroup = 0;
+    if (m_msGroups[m_activeMsGroup].entries.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("提示"),
+            QStringLiteral("当前分组「%1」没有命令，请先新建")
+                .arg(m_msGroups[m_activeMsGroup].name));
         return;
     }
     bool ok = false;
@@ -2232,6 +2776,7 @@ void SerialTool::startMsLoop() {
         interval = 1000;
     m_entryMsInterval->setText(QString::number(interval));
     m_msLooping = true;
+    m_msLoopGroup = m_activeMsGroup;
     m_msLoopIndex = 0;
     m_btnStopMs->setEnabled(true);
     m_msLoopTimer->start(interval);
@@ -2246,7 +2791,12 @@ void SerialTool::msLoopTick() {
         stopMsLoop();
         return;
     }
-    if (m_msLoopIndex >= m_msEntries.size()) {
+    if (m_msLoopGroup < 0 || m_msLoopGroup >= m_msGroups.size()) {
+        stopMsLoop();
+        return;
+    }
+    const QVector<MsEntry>& es = m_msGroups[m_msLoopGroup].entries;
+    if (m_msLoopIndex >= es.size()) {
         if (m_chkMsLoop->isChecked())
             m_msLoopIndex = 0;
         else {
@@ -2254,7 +2804,7 @@ void SerialTool::msLoopTick() {
             return;
         }
     }
-    sendMsEntry(m_msLoopIndex);
+    sendMsEntry(m_msLoopGroup, m_msLoopIndex);
     ++m_msLoopIndex;
 }
 
@@ -2425,16 +2975,18 @@ void SerialTool::histClear() {
 // ================= 面板切换 =================
 
 void SerialTool::toggleWindow(int tabIndex) {
-    if (m_msTabs->isVisible()) {
+    if (m_msPanel->isVisible()) {
         if (m_msTabs->currentIndex() == tabIndex) {
-            m_msTabs->hide();
+            m_msPanel->hide();
             return;
         }
         m_msTabs->setCurrentIndex(tabIndex);
     } else {
-        m_msTabs->show();
+        m_msPanel->show();
+        if (tabIndex < 0 || tabIndex >= m_msTabs->count())
+            tabIndex = (m_msTabs->count() > 1) ? 1 : 0;
         m_msTabs->setCurrentIndex(tabIndex);
-        if (tabIndex == 0)
+        if (m_msTabs->currentIndex() == 0)
             refreshHistoryList();
     }
 }
@@ -2457,14 +3009,22 @@ QString SerialTool::configPath() const {
            + name + QStringLiteral("_config.json");
 }
 
-QJsonArray SerialTool::msEntriesToData() const {
+QJsonArray SerialTool::msGroupsToData() const {
     QJsonArray arr;
-    for (const auto& e : m_msEntries) {
-        QJsonObject o;
-        o[QStringLiteral("hex")] = e.hex;
-        o[QStringLiteral("content")] = e.content;
-        o[QStringLiteral("label")] = e.label;
-        arr.append(o);
+    for (const auto& grp : m_msGroups) {
+        QJsonObject go;
+        go[QStringLiteral("name")] = grp.name;
+        go[QStringLiteral("collapsed")] = grp.collapsed;
+        QJsonArray ea;
+        for (const auto& e : grp.entries) {
+            QJsonObject eo;
+            eo[QStringLiteral("hex")] = e.hex;
+            eo[QStringLiteral("content")] = e.content;
+            eo[QStringLiteral("label")] = e.label;
+            ea.append(eo);
+        }
+        go[QStringLiteral("entries")] = ea;
+        arr.append(go);
     }
     return arr;
 }
@@ -2484,8 +3044,20 @@ void SerialTool::saveParams(bool silent) {
     o[QStringLiteral("add_crlf")] = m_chkAddCrlf->isChecked();
     o[QStringLiteral("interval_ms")] = m_entryInterval->text();
     o[QStringLiteral("show_ts")] = m_chkShowTs->isChecked();
-    o[QStringLiteral("ms_entries")] = msEntriesToData();
+    o[QStringLiteral("ms_groups")] = msGroupsToData();
     o[QStringLiteral("send_history")] = QJsonArray::fromStringList(m_sendHistory);
+    // 搜索历史：带时间戳，按时间倒序
+    {
+        QJsonArray shArr;
+        for (const auto& h : m_searchHistory) {
+            QJsonObject ho;
+            ho[QStringLiteral("text")] = h.text;
+            ho[QStringLiteral("ts")] = h.timestamp;
+            shArr.append(ho);
+        }
+        o[QStringLiteral("search_history")] = shArr;
+    }
+    o[QStringLiteral("search_text")] = m_searchText;
     o[QStringLiteral("checksum")] = m_cmbChecksum->currentText();
     o[QStringLiteral("cs_start")] =
         m_entryCsStart->text().trimmed().isEmpty() ? QStringLiteral("1")
@@ -2558,45 +3130,59 @@ void SerialTool::loadParamsInner(bool silent) {
             break;
         }
     }
-    // 多字符串面板（含旧字段迁移：quick_cmds + send_history → ms_entries）
-    QJsonArray msArr = o.value(QStringLiteral("ms_entries")).toArray();
-    if (msArr.isEmpty()) {
-        QStringList seen;
-        const QJsonArray quick = o.value(QStringLiteral("quick_cmds")).toArray();
-        const QJsonArray hist = o.value(QStringLiteral("send_history")).toArray();
-        if (!quick.isEmpty() || !hist.isEmpty()) {
-            for (const QJsonValue& v : quick) {
-                const QString s = v.toString();
-                if (!s.isEmpty() && !seen.contains(s))
-                    seen.append(s);
-            }
-            for (const QJsonValue& v : hist) {
-                const QString s = v.toString();
-                if (!s.isEmpty() && !seen.contains(s))
-                    seen.append(s);
-            }
-            for (const QString& s : seen) {
-                QJsonObject e;
-                e[QStringLiteral("hex")] = false;
-                e[QStringLiteral("content")] = s;
-                QString label = s.left(8);
-                label.replace(QLatin1Char('\n'), QLatin1Char(' '));
-                e[QStringLiteral("label")] = label.isEmpty() ? QStringLiteral("导入") : label;
-                msArr.append(e);
+    // 多字符串面板（分组）：优先读 ms_groups；无则把旧 ms_entries / quick_cmds
+    // 迁移进一个默认分组，保证老配置不丢
+    m_msGroups.clear();
+    QJsonArray grpArr = o.value(QStringLiteral("ms_groups")).toArray();
+    if (!grpArr.isEmpty()) {
+        m_msGroups = msGroupsFromArray(grpArr);
+    } else {
+        // ---- 旧字段迁移 ----
+        QJsonArray msArr = o.value(QStringLiteral("ms_entries")).toArray();
+        if (msArr.isEmpty()) {
+            QStringList seen;
+            const QJsonArray quick = o.value(QStringLiteral("quick_cmds")).toArray();
+            const QJsonArray hist = o.value(QStringLiteral("send_history")).toArray();
+            if (!quick.isEmpty() || !hist.isEmpty()) {
+                for (const QJsonValue& v : quick) {
+                    const QString s = v.toString();
+                    if (!s.isEmpty() && !seen.contains(s))
+                        seen.append(s);
+                }
+                for (const QJsonValue& v : hist) {
+                    const QString s = v.toString();
+                    if (!s.isEmpty() && !seen.contains(s))
+                        seen.append(s);
+                }
+                for (const QString& s : seen) {
+                    QJsonObject e;
+                    e[QStringLiteral("hex")] = false;
+                    e[QStringLiteral("content")] = s;
+                    QString label = s.left(8);
+                    label.replace(QLatin1Char('\n'), QLatin1Char(' '));
+                    e[QStringLiteral("label")] = label.isEmpty() ? QStringLiteral("导入") : label;
+                    msArr.append(e);
+                }
             }
         }
+        if (!msArr.isEmpty()) {
+            MsGroup def;
+            def.name = QStringLiteral("默认");
+            for (const QJsonValue& v : msArr) {
+                const QJsonObject e = v.toObject();
+                MsEntry me;
+                me.hex = e.value(QStringLiteral("hex")).toBool(false);
+                me.content = e.value(QStringLiteral("content")).toString();
+                me.label = e.value(QStringLiteral("label")).toString(QStringLiteral("发送"));
+                if (me.label.isEmpty())
+                    me.label = QStringLiteral("发送");
+                def.entries.append(me);
+            }
+            m_msGroups.append(def);
+        }
     }
-    m_msEntries.clear();
-    for (const QJsonValue& v : msArr) {
-        const QJsonObject e = v.toObject();
-        MsEntry me;
-        me.hex = e.value(QStringLiteral("hex")).toBool(false);
-        me.content = e.value(QStringLiteral("content")).toString();
-        me.label = e.value(QStringLiteral("label")).toString(QStringLiteral("发送"));
-        if (me.label.isEmpty())
-            me.label = QStringLiteral("发送");
-        m_msEntries.append(me);
-    }
+    if (m_activeMsGroup >= m_msGroups.size())
+        m_activeMsGroup = m_msGroups.isEmpty() ? 0 : m_msGroups.size() - 1;
     refreshMsRows();
     m_sendHistory.clear();
     const QJsonArray histArr = o.value(QStringLiteral("send_history")).toArray();
@@ -2605,6 +3191,31 @@ void SerialTool::loadParamsInner(bool silent) {
     while (m_sendHistory.size() > 50)
         m_sendHistory.removeLast();
     refreshHistoryList();
+    // 搜索历史（带时间戳）
+    m_searchHistory.clear();
+    const QJsonArray shArr = o.value(QStringLiteral("search_history")).toArray();
+    for (const QJsonValue& v : shArr) {
+        SearchHistoryEntry e;
+        if (v.isString()) {
+            // 兼容旧版纯字符串格式
+            e.text = v.toString();
+            e.timestamp = 0;
+        } else if (v.isObject()) {
+            const QJsonObject ho = v.toObject();
+            e.text = ho.value(QStringLiteral("text")).toString();
+            e.timestamp = qint64(ho.value(QStringLiteral("ts")).toVariant().toLongLong());
+        }
+        if (!e.text.isEmpty())
+            m_searchHistory.append(e);
+    }
+    // 按时间戳倒序排列（最近的在前）
+    std::sort(m_searchHistory.begin(), m_searchHistory.end(),
+              [](const SearchHistoryEntry& a, const SearchHistoryEntry& b) {
+                  return a.timestamp > b.timestamp;
+              });
+    while (m_searchHistory.size() > 30)
+        m_searchHistory.removeLast();
+    m_searchText = o.value(QStringLiteral("search_text")).toString();
     const QString ck = o.value(QStringLiteral("checksum")).toString(QStringLiteral("None"));
     if (sjj::CHECKSUMS.contains(ck))
         m_cmbChecksum->setCurrentText(ck);
@@ -2636,7 +3247,7 @@ void SerialTool::loadParamsInner(bool silent) {
     }
     // 命令面板（历史/快捷命令）显示状态恢复
     if (o.value(QStringLiteral("panel_visible")).toBool(false)) {
-        m_msTabs->show();
+        m_msPanel->show();
         const int idx = o.value(QStringLiteral("panel_tab")).toInt(0);
         if (idx >= 0 && idx < m_msTabs->count())
             m_msTabs->setCurrentIndex(idx);

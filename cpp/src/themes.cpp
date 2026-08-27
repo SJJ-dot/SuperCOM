@@ -185,6 +185,23 @@ QScrollBar::handle:horizontal{background:{scrollbar_handle};border-radius:5px;mi
 QScrollBar::add-line, QScrollBar::sub-line{height:0;width:0;}
 QScrollBar::add-page, QScrollBar::sub-page{background:transparent;}
 QToolTip{background-color:{menu_bg};color:{menu_fg};border:1px solid {input_border};}
+/* 搜索条图标化开关（VS Code 风格：扁平、亮起=主色高亮） */
+QToolButton#searchOpt{background:transparent;color:{text_primary};border:1px solid transparent;border-radius:3px;padding:0;font-weight:bold;font-size:11px;}
+QToolButton#searchOpt:hover{background:{btn_hover};border-color:{panel_border};color:{accent};}
+QToolButton#searchOpt:checked{background:{accent};color:#FFFFFF;border-color:{accent};}
+/* 搜索条工具按钮（▲/▼/✕） */
+QToolButton#searchNav, QToolButton#searchClose{background:transparent;color:{text_primary};border:1px solid transparent;border-radius:3px;padding:0;font-size:10px;}
+QToolButton#searchNav:hover, QToolButton#searchClose:hover{background:{btn_hover};color:{accent};}
+/* 标签页右上角 + 按钮 */
+QToolButton#tabCornerPlus{background:transparent;color:{accent};border:1px solid {accent};border-radius:11px;font-size:14px;font-weight:bold;padding:0;margin:0 2px;}
+QToolButton#tabCornerPlus:hover{background:{accent};color:#FFFFFF;}
+/* 选项卡右上角下拉箭头（QToolButton，弹出 Qt::ToolTip QListWidget） */
+QToolButton#tabDropdown{background:{btn_bg};color:{accent};border:1px solid {panel_border};border-radius:3px;font-size:12px;font-weight:bold;padding:2px 1px;margin:0;min-width:18px;max-width:20px;}
+QToolButton#tabDropdown:hover{background:{accent};color:#FFFFFF;border-color:{accent};}
+/* 选项卡下拉弹窗（Qt::ToolTip QListWidget） */
+QListWidget#tabPopup{background:{panel_bg};color:{text};border:1px solid {panel_border};padding:4px;outline:0;}
+QListWidget#tabPopup::item{padding:4px 8px;}
+QListWidget#tabPopup::item:selected{background:{accent};color:#FFFFFF;}
 #statusBar{background-color:{status_bg};color:{status_fg};border-top:1px solid {status_border};}
 #statusBar QLabel{color:{status_fg};background:transparent;}
 QFrame#cs_group{border:none;background:transparent;}
