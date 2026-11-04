@@ -2410,6 +2410,11 @@ void SerialTool::refreshMsRows() {
         lay->setContentsMargins(4, 4, 4, 4);
         lay->setSpacing(4);
 
+        // 分组下标不能按构建时的 g 捕获：拖动选项卡排序后页面控件会跟着移动，但捕获
+        // 的旧下标不会变，改名 / 删组 / 加命令就会作用到别的分组（表现为「改名后对不上」）。
+        // 统一按 page 在选项卡里的实时位置解析，tab 下标与 m_msGroups 下标始终同序。
+        auto groupIndex = [this, page] { return m_msTabs->indexOf(page); };
+
         // ---- 分组头：组名 / 加命令 / 删组 ----
         auto* header = new QHBoxLayout;
         header->setSpacing(4);
@@ -2417,14 +2422,24 @@ void SerialTool::refreshMsRows() {
         nameEdit->setPlaceholderText(QStringLiteral("分组名（如 测零 / 防坠）"));
         nameEdit->setMinimumWidth(80);
         connect(nameEdit, &QLineEdit::textChanged, this,
-                [this, g](const QString& t) { renameMsGroup(g, t); });
-        connect(nameEdit, &QLineEdit::editingFinished, this,
-                [this, g] { setActiveMsGroup(g); });
+                [this, groupIndex](const QString& t) {
+                    const int g = groupIndex();
+                    if (g >= 0)
+                        renameMsGroup(g, t);
+                });
+        connect(nameEdit, &QLineEdit::editingFinished, this, [this, groupIndex] {
+            const int g = groupIndex();
+            if (g >= 0)
+                setActiveMsGroup(g);
+        });
         header->addWidget(nameEdit, 1);
         auto* addCmd = new QPushButton(QStringLiteral("\uFF0B 命令"), page);
         addCmd->setFixedWidth(72);
         addCmd->setToolTip(QStringLiteral("在本组新增命令"));
-        connect(addCmd, &QPushButton::clicked, this, [this, g] {
+        connect(addCmd, &QPushButton::clicked, this, [this, groupIndex] {
+            const int g = groupIndex();
+            if (g < 0)
+                return;
             m_activeMsGroup = g;
             newMsEntry();
         });
@@ -2432,7 +2447,11 @@ void SerialTool::refreshMsRows() {
         auto* delGrp = new QPushButton(QStringLiteral("\u2715 删组"), page);
         delGrp->setFixedWidth(60);
         delGrp->setToolTip(QStringLiteral("删除该分组"));
-        connect(delGrp, &QPushButton::clicked, this, [this, g] { deleteMsGroup(g); });
+        connect(delGrp, &QPushButton::clicked, this, [this, groupIndex] {
+            const int g = groupIndex();
+            if (g >= 0)
+                deleteMsGroup(g);
+        });
         header->addWidget(delGrp);
         lay->addLayout(header);
 
@@ -2445,29 +2464,47 @@ void SerialTool::refreshMsRows() {
         rows->setSpacing(2);
         rows->addStretch(1);
         for (int i = 0; i < grp.entries.size(); ++i) {
-            const int gi = g, ei = i;
+            const int ei = i;
             auto* row = new QHBoxLayout;
             row->setSpacing(2);
             auto* chk = new ThemeCheckBox(QStringLiteral("HEX"), page);
             chk->setThemeColors(m_themeC);
             chk->setChecked(grp.entries[i].hex);
-            connect(chk, &QCheckBox::toggled, this,
-                    [this, gi, ei](bool v) { msSetHex(gi, ei, v); });
+            connect(chk, &QCheckBox::toggled, this, [this, groupIndex, ei](bool v) {
+                const int g = groupIndex();
+                if (g >= 0)
+                    msSetHex(g, ei, v);
+            });
             row->addWidget(chk);
             auto* ent = new QLineEdit(grp.entries[i].content);
-            connect(ent, &QLineEdit::textChanged, this,
-                    [this, gi, ei](const QString& t) { msSetContent(gi, ei, t); });
+            connect(ent, &QLineEdit::textChanged, this, [this, groupIndex, ei](const QString& t) {
+                const int g = groupIndex();
+                if (g >= 0)
+                    msSetContent(g, ei, t);
+            });
             row->addWidget(ent, 1);
             auto* btn = new QPushButton(grp.entries[i].label);
             btn->setFixedWidth(96);
-            connect(btn, &QPushButton::clicked, this, [this, gi, ei] { sendMsEntry(gi, ei); });
+            connect(btn, &QPushButton::clicked, this, [this, groupIndex, ei] {
+                const int g = groupIndex();
+                if (g >= 0)
+                    sendMsEntry(g, ei);
+            });
             btn->setContextMenuPolicy(Qt::CustomContextMenu);
             connect(btn, &QWidget::customContextMenuRequested, this,
-                    [this, gi, ei](const QPoint&) { renameMsEntry(gi, ei); });
+                    [this, groupIndex, ei](const QPoint&) {
+                        const int g = groupIndex();
+                        if (g >= 0)
+                            renameMsEntry(g, ei);
+                    });
             row->addWidget(btn);
             auto* xbtn = new QPushButton(QStringLiteral("\u2715"), page);
             xbtn->setFixedWidth(28);
-            connect(xbtn, &QPushButton::clicked, this, [this, gi, ei] { deleteMsEntry(gi, ei); });
+            connect(xbtn, &QPushButton::clicked, this, [this, groupIndex, ei] {
+                const int g = groupIndex();
+                if (g >= 0)
+                    deleteMsEntry(g, ei);
+            });
             row->addWidget(xbtn);
             rows->insertLayout(rows->count() - 1, row);
         }
