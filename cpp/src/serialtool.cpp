@@ -40,6 +40,7 @@
 #include <QClipboard>
 #include <QStyle>
 #include <QStyleOption>
+#include <QScreen>
 #include <QTimer>
 #include <QUrl>
 #include <QDesktopServices>
@@ -62,9 +63,6 @@
 #include <functional>
 
 #ifdef Q_OS_WIN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -72,6 +70,7 @@
 #include <dwmapi.h>
 #endif
 
+#include "listpopup.h"
 #include "utils.h"
 #include "updater.h"
 
@@ -243,37 +242,31 @@ bool SerialTool::eventFilter(QObject* obj, QEvent* event) {
             }
         }
     }
-    // 选项卡下拉弹窗：popup 超出主窗口边界的部分收不到 viewport 鼠标事件
-    // （DWM 透明窗口下 WS_EX_LAYERED 穿透），改用全局拦截 + mapFromGlobal 手动换算。
-    if (m_tabPopup && m_tabPopup->isVisible()) {
-        if (t == QEvent::MouseMove) {
-            auto* me = static_cast<QMouseEvent*>(event);
-            const QPoint vp = m_tabPopup->viewport()->mapFromGlobal(me->globalPosition().toPoint());
-            const QModelIndex idx = m_tabPopup->indexAt(vp);
-            if (idx.isValid())
-                m_tabPopup->setCurrentRow(idx.row());
-        } else if (t == QEvent::MouseButtonPress || t == QEvent::MouseButtonDblClick) {
-            auto* me = static_cast<QMouseEvent*>(event);
-            const QPoint gpos = me->globalPosition().toPoint();
-            if (m_tabPopup->geometry().contains(gpos)) {
-                // 点击在弹窗内（含死区）：手动换算 viewport 坐标找行
-                const QPoint vp = m_tabPopup->viewport()->mapFromGlobal(gpos);
-                const QModelIndex idx = m_tabPopup->indexAt(vp);
-                if (idx.isValid()) {
-                    m_msTabs->setCurrentIndex(idx.row());
-                    m_tabPopup->hide();
-                }
-                return true;  // 拦截，不传给其他处理器
-            } else {
-                // 点击在弹窗外：隐藏
-                m_tabPopup->hide();
-            }
-        }
-    }
     if (obj == m_recvBox && t == QEvent::Resize) {
         positionScrollBottomBtn();
         return QWidget::eventFilter(obj, event);
     }
+    // 选项卡列表浮层：点击浮层外部（含再次点击下拉按钮）立即收起。
+    // 自己处理而不依赖 Qt，是因为该浮层是普通 QWidget(Qt::Popup)，
+    // 未被 QApplicationPrivate 的弹出列表接管，点击外部不会自动关闭。
+    if (m_tabPopup && m_tabPopup->isVisible()
+        && (t == QEvent::MouseButtonPress || t == QEvent::MouseButtonDblClick)) {
+        if (auto* me = static_cast<QMouseEvent*>(event)) {
+            const QPoint gpos = me->globalPosition().toPoint();
+            if (!m_tabPopup->geometry().contains(gpos))
+                hideTabPopup();
+        }
+    }
+    // 弹出层打开期间不参与窗口边缘缩放判定：否则落在窗口边缘的点击会被缩放逻辑
+    // 吞掉，导致「再点一次按钮菜单不收起」，且按钮收不到 Release 卡在按下态。
+    if (QApplication::activePopupWidget())
+        return false;
+    // 角落下拉按钮本身就贴着窗口右边缘，必须放行它的点击/悬停
+    if (auto* w = qobject_cast<QWidget*>(obj);
+        w && m_tabDropdownBtn
+        && (w == m_tabDropdownBtn || m_tabDropdownBtn->isAncestorOf(w)))
+        return false;
+
     if (t == QEvent::MouseMove || t == QEvent::MouseButtonPress
         || t == QEvent::MouseButtonRelease) {
         auto* me = static_cast<QMouseEvent*>(event);
@@ -616,44 +609,55 @@ void SerialTool::buildUi() {
     msTopLay->addWidget(btnNewGrp);
     msPanelLay->addWidget(msTop);
 
-    // 选项卡：第 0 页=历史记录，随后每页=一个快捷命令分组（横向排列）
+    // 选项卡：每页=一个快捷命令分组（横向排列），支持手动拖动排序
     m_msTabs = new QTabWidget(m_msPanel);
     m_msTabs->setUsesScrollButtons(false);  // 禁用 Qt 自带滚动箭头，改用右侧下拉箭头
-    buildHistoryTab();
+    m_msTabs->tabBar()->setMovable(true);   // 快捷命令分组支持拖动排序
+    m_msTabs->tabBar()->setToolTip(QStringLiteral("按住标签左右拖动可调整分组顺序"));
     // 分组选项卡由 refreshMsRows() 按 m_msGroups 构建（buildUi 末尾 loadParams 时调用）
     msPanelLay->addWidget(m_msTabs, 1);
     m_msPanel->hide();
     upperRow->addWidget(m_msPanel);
-    // 切换选项卡即切换当前活动分组（tab 0=历史记录不计入分组）；并刷新活动组高亮
+    // 切换选项卡即切换当前活动分组（tab 下标 = 分组下标）；并刷新活动组高亮
     connect(m_msTabs, &QTabWidget::currentChanged, this, [this](int idx) {
-        const int g = idx - 1;
-        if (g >= 0 && g < m_msGroups.size()) {
-            m_activeMsGroup = g;
+        if (idx >= 0 && idx < m_msGroups.size()) {
+            m_activeMsGroup = idx;
             applyMsActiveStyle();
         }
     });
-    // 右上角下拉箭头：点击弹出 Qt::ToolTip 列表（和搜索历史弹窗同方案）
+    // 拖动排序完成：同步 m_msGroups 顺序（选项卡顺序即分组顺序），并持久化
+    connect(m_msTabs->tabBar(), &QTabBar::tabMoved, this, [this](int from, int to) {
+        if (from < 0 || from >= m_msGroups.size() || to < 0
+                || to >= m_msGroups.size() || from == to)
+            return;
+        m_msGroups.insert(to, m_msGroups.takeAt(from));
+        // 活动分组跟着被移动/平移，保持指向同一个分组
+        if (m_activeMsGroup == from)
+            m_activeMsGroup = to;
+        else if (from < m_activeMsGroup && to >= m_activeMsGroup)
+            --m_activeMsGroup;
+        else if (from > m_activeMsGroup && to <= m_activeMsGroup)
+            ++m_activeMsGroup;
+        applyMsActiveStyle();
+        scheduleQuickCmdSave();   // 保存新顺序（多实例经配置文件同步）
+    });
+    // 右上角下拉箭头：点击弹出分组列表浮层（TabListPopup），浮层显示在按钮左侧
     m_tabDropdownBtn = new QToolButton(m_msTabs);
     m_tabDropdownBtn->setText(QStringLiteral("\u25BE"));  // ▾
-    m_tabDropdownBtn->setToolTip(QStringLiteral("显示选项卡列表"));
+    m_tabDropdownBtn->setToolTip(QStringLiteral("显示/收起选项卡列表"));
     m_tabDropdownBtn->setObjectName(QStringLiteral("tabDropdown"));
-    m_msTabs->setCornerWidget(m_tabDropdownBtn, Qt::TopRightCorner);
+    m_tabDropdownBtn->setCheckable(true);                 // 展开期间保持高亮，收起后自动复位
+    m_tabDropdownBtn->setAutoRaise(true);
+    m_tabDropdownBtn->setFixedSize(22, 22);
+    m_tabDropdownBtn->setCursor(Qt::PointingHandCursor);
+    // 用容器加右边距：面板布局本身无内边距，按钮直接贴边会被面板边框裁掉一截
+    auto* tabCorner = new QWidget(m_msTabs);
+    auto* tabCornerLay = new QHBoxLayout(tabCorner);
+    tabCornerLay->setContentsMargins(0, 0, 6, 0);
+    tabCornerLay->setSpacing(0);
+    tabCornerLay->addWidget(m_tabDropdownBtn);
+    m_msTabs->setCornerWidget(tabCorner, Qt::TopRightCorner);
     connect(m_tabDropdownBtn, &QToolButton::clicked, this, &SerialTool::showTabDropdown);
-    // 选项卡下拉弹窗：Qt::ToolTip 顶层无边框（不抢鼠标），点击 item 由 itemClicked 处理，
-    // 点击外部由 qApp 全局 eventFilter 隐藏（和 m_historyPopup 同机制）
-    m_tabPopup = new QListWidget(this);
-    m_tabPopup->setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint);
-    m_tabPopup->setFocusPolicy(Qt::NoFocus);
-    m_tabPopup->setObjectName(QStringLiteral("tabPopup"));
-    m_tabPopup->hide();
-    connect(m_tabPopup, &QListWidget::itemClicked, this, [this](QListWidgetItem* it) {
-        if (!it)
-            return;
-        const int row = m_tabPopup->row(it);
-        if (row >= 0 && row < m_msTabs->count())
-            m_msTabs->setCurrentIndex(row);
-        m_tabPopup->hide();
-    });
 
     // 接收区按钮行
     auto* rt = new QHBoxLayout;
@@ -683,13 +687,9 @@ void SerialTool::buildUi() {
     btn = new QPushButton(QStringLiteral("保存数据"), upper);
     connect(btn, &QPushButton::clicked, this, &SerialTool::saveRecv);
     rt->addWidget(btn);
-    btn = new QPushButton(QStringLiteral("历史记录"), upper);
-    btn->setObjectName(QStringLiteral("btnHistory"));
-    connect(btn, &QPushButton::clicked, this, [this] { toggleWindow(0); });
-    rt->addWidget(btn);
     btn = new QPushButton(QStringLiteral("快捷命令"), upper);
     btn->setObjectName(QStringLiteral("btnQuickCmd"));
-    connect(btn, &QPushButton::clicked, this, [this] { toggleWindow(1); });
+    connect(btn, &QPushButton::clicked, this, [this] { toggleWindow(0); });
     rt->addWidget(btn);
     rt->addStretch(1);
     upperLay->addLayout(rt);
@@ -906,25 +906,6 @@ void SerialTool::buildUi() {
     connect(m_msLoopTimer, &QTimer::timeout, this, &SerialTool::msLoopTick);
 }
 
-void SerialTool::buildHistoryTab() {
-    auto* w = new QWidget(m_msTabs);
-    auto* lay = new QVBoxLayout(w);
-    auto* bar = new QHBoxLayout;
-    auto* btn = new QPushButton(QStringLiteral("删除"), w);
-    connect(btn, &QPushButton::clicked, this, &SerialTool::histDelete);
-    bar->addWidget(btn);
-    btn = new QPushButton(QStringLiteral("清空"), w);
-    connect(btn, &QPushButton::clicked, this, &SerialTool::histClear);
-    bar->addWidget(btn);
-    bar->addStretch(1);
-    lay->addLayout(bar);
-    m_histList = new QListWidget(w);
-    m_histList->setObjectName(QStringLiteral("histList"));
-    connect(m_histList, &QListWidget::itemDoubleClicked, this, &SerialTool::histLoad);
-    lay->addWidget(m_histList, 1);
-    m_msTabs->addTab(w, QStringLiteral("历史"));
-}
-
 // ================= 主题 =================
 
 void SerialTool::applyTheme(const QString& themeName) {
@@ -954,8 +935,8 @@ void SerialTool::applyTheme(const QString& themeName) {
     for (auto* cb : checkboxes)
         cb->setThemeColors(m_themeC);
     const auto combos = findChildren<StyledComboBox*>();
-    for (auto* combo : combos)
-        combo->setArrowColor(QColor(m_themeC.value(QStringLiteral("text_primary"))));
+    for (auto* cb : combos)
+        cb->setThemeColors(m_themeC);
     updateChecksumHighlight();
     refreshStatus();
     refreshView();   // 切主题后强制重建接收区（按新主题色重新渲染已有文字）
@@ -2408,11 +2389,11 @@ void SerialTool::timerSendTick() {
 // ================= 多字符串发送 =================
 
 void SerialTool::refreshMsRows() {
-    // 整体重建分组选项卡（保留第 0 页「历史记录」）：确保改名 / 增删分组 / 命令状态一致
+    // 整体重建分组选项卡：确保改名 / 增删分组 / 命令状态一致
     // block currentChanged：removeTab 过程中 Qt 自动切 tab 会触发 currentChanged
     // 把 m_activeMsGroup 改成别的值，导致新建分组后定位错误。
     m_msTabs->blockSignals(true);
-    while (m_msTabs->count() > 1) {
+    while (m_msTabs->count() > 0) {
         QWidget* w = m_msTabs->widget(m_msTabs->count() - 1);
         m_msTabs->removeTab(m_msTabs->count() - 1);
         if (w)
@@ -2499,7 +2480,7 @@ void SerialTool::refreshMsRows() {
     if (m_msGroups.isEmpty())
         m_msTabs->setCurrentIndex(0);
     else
-        m_msTabs->setCurrentIndex(m_activeMsGroup + 1);
+        m_msTabs->setCurrentIndex(m_activeMsGroup);
     applyMsActiveStyle();
     // 恢复信号，手动触发一次 currentChanged 同步状态
     m_msTabs->blockSignals(false);
@@ -2513,9 +2494,8 @@ void SerialTool::applyMsActiveStyle() {
     const QString normal = m_themeC.value(QStringLiteral("text_secondary"));
     const QColor accentCol(accent);
     const QColor normalCol(normal);
-    for (int i = 1; i < m_msTabs->count(); ++i) {
-        const int g = i - 1;
-        const bool active = (g == m_activeMsGroup);
+    for (int i = 0; i < m_msTabs->count(); ++i) {
+        const bool active = (i == m_activeMsGroup);
         // 活动分组选项卡：主题强调色文字；非活动：次级文字色
         bar->setTabTextColor(i, active ? accentCol : normalCol);
     }
@@ -2534,41 +2514,91 @@ void SerialTool::cycleMsTab(int dir) {
     m_msTabs->setCurrentIndex(idx);
 }
 
-void SerialTool::showTabDropdown() {
+void SerialTool::hideTabPopup() {
     if (!m_tabPopup)
         return;
-    const int n = m_msTabs->count();
-    if (n == 0)
+    m_tabPopup->close();
+    m_tabPopup = nullptr;
+    // 记录收起时刻：紧随其后的这次点击（press 收起 → release 触发 clicked）不再重新弹出
+    m_tabPopupClosedAt = QDateTime::currentMSecsSinceEpoch();
+    if (m_tabDropdownBtn) {
+        m_tabDropdownBtn->setChecked(false);
+        m_tabDropdownBtn->setDown(false);
+        m_tabDropdownBtn->setAttribute(Qt::WA_UnderMouse, false);
+        m_tabDropdownBtn->update();
+    }
+}
+
+void SerialTool::showTabDropdown() {
+    // 浮层刚因「点外部/再点按钮」被收起时，这次点击只作收起用，不能再立刻弹出一次
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_tabPopupClosedAt && nowMs - m_tabPopupClosedAt < 250) {
+        m_tabPopupClosedAt = 0;
+        m_tabDropdownBtn->setChecked(false);
         return;
-    m_tabPopup->clear();
+    }
+
+    // 再次点击：已经展开则收起（按钮高亮同步复位）
+    if (m_tabPopup) {
+        hideTabPopup();
+        return;
+    }
+
+    const int n = m_msTabs->count();
+    if (n == 0) {
+        m_tabDropdownBtn->setChecked(false);
+        return;
+    }
+
+    QStringList items;
+    items.reserve(n);
     for (int i = 0; i < n; ++i) {
         QString label = m_msTabs->tabText(i);
         if (label.isEmpty())
             label = QStringLiteral("Tab %1").arg(i);
-        auto* item = new QListWidgetItem(label);
-        if (i == m_msTabs->currentIndex())
-            item->setSelected(true);
-        m_tabPopup->addItem(item);
+        items << label;
     }
-    const QPoint globalPos = m_tabDropdownBtn->mapToGlobal(QPoint(0, m_tabDropdownBtn->height()));
-    m_tabPopup->setFixedWidth(qMax(120, m_tabDropdownBtn->width() * 4));
-    const int hgt = qMin(m_tabPopup->sizeHintForRow(0) * n + 8, 300);
-    m_tabPopup->setFixedHeight(hgt);
-    m_tabPopup->move(globalPos);
-    m_tabPopup->show();
-}
 
-void SerialTool::hideTabPopup() {
-    if (m_tabPopup)
-        m_tabPopup->hide();
+    auto* pop = new ListPopup(items, m_msTabs->currentIndex(), m_themeC, this);
+    pop->onPick = [this](int i) {
+        if (i >= 0 && i < m_msTabs->count())
+            m_msTabs->setCurrentIndex(i);
+    };
+    m_tabPopup = pop;
+    m_tabDropdownBtn->setChecked(true);
+    // 浮层关闭（选中/点外部/再次点按钮）后复位按钮，避免高亮或按下态残留
+    connect(pop, &QObject::destroyed, this, [this] {
+        m_tabPopup = nullptr;
+        if (m_tabDropdownBtn) {
+            m_tabDropdownBtn->setChecked(false);
+            m_tabDropdownBtn->setDown(false);
+            m_tabDropdownBtn->setAttribute(Qt::WA_UnderMouse, false);
+            m_tabDropdownBtn->update();
+        }
+    });
+    pop->adjustSize();
+
+    // 浮层整体（含四周留白）落在按钮左侧，绝不压住按钮，否则点按钮会落在浮层窗口上
+    const QPoint gp = m_tabDropdownBtn->mapToGlobal(QPoint(0, 0));
+    int px = gp.x() - pop->width();
+    int py = gp.y() - ListPopup::kPad;
+    if (QScreen* s = screen() ? screen() : QGuiApplication::primaryScreen()) {
+        const QRect a = s->availableGeometry();
+        px = qBound(a.left() - ListPopup::kPad, px,
+                    a.right() + 1 - pop->width());
+        py = qBound(a.top() - ListPopup::kPad, py,
+                    a.bottom() + 1 - pop->height() + ListPopup::kPad);
+    }
+    pop->move(px, py);
+    pop->show();
 }
 
 void SerialTool::setActiveMsGroup(int g) {
     if (g < 0 || g >= m_msGroups.size())
         return;
     m_activeMsGroup = g;
-    if (m_msTabs->count() > g + 1)
-        m_msTabs->setCurrentIndex(g + 1);
+    if (g >= 0 && g < m_msTabs->count())
+        m_msTabs->setCurrentIndex(g);
     applyMsActiveStyle();
 }
 
@@ -2602,8 +2632,8 @@ void SerialTool::renameMsGroup(int g, const QString& name) {
         return;
     m_msGroups[g].name = name;
     // 实时更新对应选项卡标题（不重建，避免输入框失焦）
-    if (g + 1 < m_msTabs->count())
-        m_msTabs->setTabText(g + 1, name.isEmpty() ? QStringLiteral("分组") : name);
+    if (g >= 0 && g < m_msTabs->count())
+        m_msTabs->setTabText(g, name.isEmpty() ? QStringLiteral("分组") : name);
     scheduleQuickCmdSave();   // 防抖保存（不重建，避免输入框失焦）
 }
 
@@ -2933,6 +2963,8 @@ void SerialTool::endSendFile() {
 // ================= 历史记录 =================
 
 void SerialTool::refreshHistoryList() {
+    if (!m_histList)
+        return;   // 历史记录选项卡已移除，仅保留数据记录
     m_histList->clear();
     for (const QString& item : m_sendHistory) {
         QString disp = item;
@@ -2984,10 +3016,8 @@ void SerialTool::toggleWindow(int tabIndex) {
     } else {
         m_msPanel->show();
         if (tabIndex < 0 || tabIndex >= m_msTabs->count())
-            tabIndex = (m_msTabs->count() > 1) ? 1 : 0;
+            tabIndex = 0;
         m_msTabs->setCurrentIndex(tabIndex);
-        if (m_msTabs->currentIndex() == 0)
-            refreshHistoryList();
     }
 }
 
@@ -3245,14 +3275,12 @@ void SerialTool::loadParamsInner(bool silent) {
         }
         resize(ww, hh);
     }
-    // 命令面板（历史/快捷命令）显示状态恢复
+    // 命令面板（快捷命令）显示状态恢复
     if (o.value(QStringLiteral("panel_visible")).toBool(false)) {
         m_msPanel->show();
         const int idx = o.value(QStringLiteral("panel_tab")).toInt(0);
         if (idx >= 0 && idx < m_msTabs->count())
             m_msTabs->setCurrentIndex(idx);
-        if (m_msTabs->currentIndex() == 0)
-            refreshHistoryList();
     }
     refreshStatus();
 }

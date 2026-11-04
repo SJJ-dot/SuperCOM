@@ -43,6 +43,8 @@ add_executable(SuperCOM
     src/utils.cpp
     src/combobox.h
     src/combobox.cpp
+    src/listpopup.h
+    src/listpopup.cpp
     src/themechkbox.h
     src/themechkbox.cpp
     src/titlebar.h

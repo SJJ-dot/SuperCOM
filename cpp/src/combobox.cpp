@@ -1,205 +1,152 @@
 #include "combobox.h"
 
-#include <QAbstractItemView>
-#include <QResizeEvent>
-#include <QStyleOptionViewItem>
-#include <QStyleOptionComboBox>
-#include <QMouseEvent>
-#include <QTimer>
-#include <QApplication>
+#include <QDateTime>
+#include <QHideEvent>
+#include <QPainter>
+#include <QPen>
+#include <QStyle>
 
-#ifdef Q_OS_WIN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
+// 下拉框外观全部交给全局 QSS（themes.cpp），本类只做三件事：
+//   1) 自绘下拉箭头（原生箭头跟随系统调色板，深色主题下几乎看不见）；
+//   2) 用自绘的 ListPopup 替代 Qt 原生弹层（与快捷命令分组浮层同一套外观）；
+//   3) 弹窗位置：默认向下展开，越过主窗口底边再向上（屏幕比窗口大，否则弹层会
+//      落到窗口外、超出窗口的条目点不到）。
 
-// Press 时强制把 view 的 currentIndex 同步为点击的 item。
-class PopupPressEnforceFilter : public QObject {
-public:
-    bool eventFilter(QObject* obj, QEvent* e) override {
-        if (e->type() == QEvent::MouseButtonPress) {
-            if (auto* v = qobject_cast<QAbstractItemView*>(obj->parent())) {
-                auto* me = static_cast<QMouseEvent*>(e);
-                const QModelIndex idx = v->indexAt(me->position().toPoint());
-                if (idx.isValid())
-                    v->setCurrentIndex(idx);
-            }
-        }
-        return false;
-    }
-};
+namespace {
+// 当前主题缓存：applyTheme 会刷新所有已存在的下拉框，但对话框等"运行期新建"的
+// 下拉框在构造时也需要箭头颜色，故在构造时从这里取。
+sjj::ThemeColors g_themeColors;
 
-// 兜底：Release 后若 popup 仍开则手动选中点击的 item。
-class PopupFallbackFilter : public QObject {
-public:
-    explicit PopupFallbackFilter(QComboBox* cb) : m_cb(cb) {}
-    bool eventFilter(QObject* obj, QEvent* e) override {
-        if (e->type() == QEvent::MouseButtonPress) {
-            auto* me = static_cast<QMouseEvent*>(e);
-            m_pressPos = me->position().toPoint();
-        } else if (e->type() == QEvent::MouseButtonRelease) {
-            const QPoint pressPos = m_pressPos;
-            QTimer::singleShot(0, this, [this, pressPos] {
-                QAbstractItemView* v = m_cb->view();
-                if (v && v->window() && v->window()->isVisible()) {
-                    const QModelIndex idx = v->indexAt(pressPos);
-                    if (idx.isValid()) {
-                        m_cb->setCurrentIndex(idx.row());
-                        m_cb->hidePopup();
-                    }
-                }
-            });
-        }
-        return false;
-    }
-private:
-    QComboBox* m_cb;
-    QPoint m_pressPos;
-};
+// 弹层除内容外的宽度：两侧留白(2×8) + 卡片左右内边距(2×6) + 卡片边框(2) +
+// 竖向滚动条预留(14)
+constexpr int kPopupChrome = ListPopup::kPad * 2 + 6 * 2 + 2 + 14;
 
-// 修复"高亮在主窗口外不跟随"：用 globalPos 手动换算 viewport 坐标。
-class PopupHoverFilter : public QObject {
-public:
-    bool eventFilter(QObject* obj, QEvent* e) override {
-        if (e->type() == QEvent::MouseMove) {
-            if (auto* v = qobject_cast<QAbstractItemView*>(obj->parent())) {
-                auto* me = static_cast<QMouseEvent*>(e);
-                const QPoint vp = v->viewport()->mapFromGlobal(me->globalPosition().toPoint());
-                const QModelIndex idx = v->indexAt(vp);
-                if (idx.isValid() && idx != v->currentIndex())
-                    v->setCurrentIndex(idx);
-            }
-        }
-        return false;
-    }
-};
-
-// 全局鼠标拦截器（qApp 级）：popup 可见时拦截所有鼠标事件。
-// 根因：Qt 6 的 QComboBox popup 在 DWM 无边框透明主窗口下，超出主窗口边界
-// 的 popup viewport 收不到鼠标事件（WS_EX_LAYERED 分层窗口命中测试穿透）。
-// 即使去掉 WS_EX_LAYERED 也不可靠。改用全局拦截 + mapFromGlobal 换算
-// viewport 坐标做 indexAt，完全绕过 viewport 自身的事件接收。
-class PopupGlobalMouseFilter : public QObject {
-public:
-    explicit PopupGlobalMouseFilter(QComboBox* cb) : m_cb(cb) {}
-    bool eventFilter(QObject*, QEvent* e) override {
-        if (!m_cb)
-            return false;
-        QAbstractItemView* v = m_cb->view();
-        if (!v || !v->window() || !v->window()->isVisible())
-            return false;
-        const QEvent::Type t = e->type();
-        if (t == QEvent::MouseMove) {
-            auto* me = static_cast<QMouseEvent*>(e);
-            const QPoint vp = v->viewport()->mapFromGlobal(me->globalPosition().toPoint());
-            const QModelIndex idx = v->indexAt(vp);
-            if (idx.isValid() && idx != v->currentIndex())
-                v->setCurrentIndex(idx);
-        } else if (t == QEvent::MouseButtonPress) {
-            auto* me = static_cast<QMouseEvent*>(e);
-            m_pressPos = me->globalPosition().toPoint();
-            const QPoint vp = v->viewport()->mapFromGlobal(m_pressPos);
-            const QModelIndex idx = v->indexAt(vp);
-            if (idx.isValid())
-                v->setCurrentIndex(idx);
-        } else if (t == QEvent::MouseButtonRelease) {
-            auto* me = static_cast<QMouseEvent*>(e);
-            const QPoint releaseGpos = me->globalPosition().toPoint();
-            const QPoint vp = v->viewport()->mapFromGlobal(releaseGpos);
-            const QModelIndex idx = v->indexAt(vp);
-            if (idx.isValid()) {
-                m_cb->setCurrentIndex(idx.row());
-                m_cb->hidePopup();
-            } else {
-                m_cb->hidePopup();
-            }
-        }
-        return false;
-    }
-private:
-    QComboBox* m_cb;
-    QPoint m_pressPos;
-};
+// 弹层关闭后多久内忽略重开请求（点一下收起时，同一次点击会被继续转发给下拉框）
+constexpr qint64 kReopenGuardMs = 200;
+} // namespace
 
 StyledComboBox::StyledComboBox(QWidget* parent) : QComboBox(parent) {
-    m_arrow = new QLabel(QStringLiteral("\u25BE"), this);
-    m_arrow->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    m_arrow->setAlignment(Qt::AlignCenter);
-    m_arrow->setStyleSheet(QStringLiteral("background:transparent;color:#4C4F69;font-size:14px;"));
-    m_arrow->resize(18, height());
-    m_arrow->move(width() - 18, 0);
-    m_arrow->show();
+    m_arrowColor = QColor(g_themeColors.value(QStringLiteral("text_secondary")));
 }
 
-void StyledComboBox::setArrowColor(const QColor& c) {
-    m_arrow->setStyleSheet(QStringLiteral("background:transparent;color:%1;font-size:14px;")
-                               .arg(c.name()));
-    m_arrow->update();
+void StyledComboBox::setThemeColors(const sjj::ThemeColors& t) {
+    g_themeColors = t;
+    m_arrowColor = QColor(t.value(QStringLiteral("text_secondary")));
+    update();
 }
 
-void StyledComboBox::resizeEvent(QResizeEvent* e) {
-    QComboBox::resizeEvent(e);
-    m_arrow->resize(18, height());
-    m_arrow->move(width() - 18, 0);
+void StyledComboBox::paintEvent(QPaintEvent* e) {
+    QComboBox::paintEvent(e);
+    if (!m_arrowColor.isValid())
+        return;
+    // 下拉箭头：右侧留白区内画一个 chevron（∨）
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    QColor c = m_arrowColor;
+    if (!isEnabled())
+        c.setAlpha(120);
+    QPen pen(c);
+    pen.setWidthF(1.6);
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
+    const qreal cx = width() - 12.0;
+    const qreal cy = height() / 2.0;
+    p.drawLine(QPointF(cx - 4.0, cy - 2.0), QPointF(cx, cy + 2.0));
+    p.drawLine(QPointF(cx, cy + 2.0), QPointF(cx + 4.0, cy - 2.0));
+}
+
+void StyledComboBox::setPopupOpen(bool open) {
+    if (property("popupOpen").toBool() == open)
+        return;
+    setProperty("popupOpen", open);
+    style()->unpolish(this);
+    style()->polish(this);
+    update();
 }
 
 void StyledComboBox::showPopup() {
-    QComboBox::showPopup();
-#ifdef Q_OS_WIN
-    if (QWidget* popup = view()->window(); popup && popup != this) {
-        // 修复 1：去掉 popup 的 WS_EX_LAYERED
-        popup->setAttribute(Qt::WA_TranslucentBackground, false);
-        popup->setAttribute(Qt::WA_NoSystemBackground, false);
-        if (HWND h = reinterpret_cast<HWND>(popup->winId())) {
-            LONG_PTR ex = GetWindowLongPtr(h, GWL_EXSTYLE);
-            if (ex & WS_EX_LAYERED) {
-                SetWindowLongPtr(h, GWL_EXSTYLE, ex & ~WS_EX_LAYERED);
-                SetWindowPos(h, nullptr, 0, 0, 0, 0,
-                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
-            }
-        }
-        // 修复 2+3+4：viewport 事件过滤器
-        if (!m_pressEnforceFilter) {
-            m_pressEnforceFilter = new PopupPressEnforceFilter;
-            view()->viewport()->installEventFilter(m_pressEnforceFilter);
-        }
-        if (!m_fallbackFilter) {
-            m_fallbackFilter = new PopupFallbackFilter(this);
-            view()->viewport()->installEventFilter(m_fallbackFilter);
-        }
-        if (!m_hoverFilter) {
-            m_hoverFilter = new PopupHoverFilter;
-            view()->viewport()->installEventFilter(m_hoverFilter);
-        }
-        // 修复 5：全局鼠标拦截器（qApp 级）
-        if (!m_globalMouseFilter) {
-            m_globalMouseFilter = new PopupGlobalMouseFilter(this);
-            qApp->installEventFilter(m_globalMouseFilter);
-        }
+    if (count() <= 0)
+        return;
+    if (m_popup) {          // 已展开：再点一次收起
+        hidePopup();
+        return;
     }
-#endif
+
+    // 收起时那一次点击，Qt 关掉浮动窗口后还会把它继续传给下拉框，于是紧接着
+    // 又调用到这里、弹层立刻被重新打开，表现就是"再点一次收不起来"。刚关掉的
+    // 一小段时间内忽略重开请求即可（真正的新点击远大于这个间隔）。
+    if (m_popupClosedAtMs > 0) {
+        const qint64 dt = QDateTime::currentMSecsSinceEpoch() - m_popupClosedAtMs;
+        m_popupClosedAtMs = 0;
+        if (dt >= 0 && dt < kReopenGuardMs)
+            return;
+    }
+
+    QStringList items;
+    items.reserve(count());
+    for (int i = 0; i < count(); ++i)
+        items << itemText(i);
+
+    // 内容宽度：至少让卡片与下拉框等宽，更长条目由 ListPopup 自身撑开
+    const int minContentW = qMax(0, width() - kPopupChrome);
+    auto* pop = new ListPopup(items, currentIndex(), g_themeColors, this, minContentW);
+    m_popup = pop;
+    pop->onPick = [this](int i) {
+        if (i >= 0 && i < count())
+            setCurrentIndex(i);
+    };
+    // 弹层不管被谁关掉（自己关 / 点空白处由 Qt 关）都会走到这里：复位高亮并记下
+    // 关闭时间，供上面的"防立刻重开"判断使用。
+    connect(pop, &QObject::destroyed, this, [this] {
+        setPopupOpen(false);
+        m_popupClosedAtMs = QDateTime::currentMSecsSinceEpoch();
+    });
+
+    pop->move(popupTopLeft(pop->size()));
+    setPopupOpen(true);
+    pop->show();
+    pop->setFocus(Qt::PopupFocusReason);
 }
 
 void StyledComboBox::hidePopup() {
+    if (m_popup) {
+        ListPopup* pop = m_popup;
+        m_popup = nullptr;
+        pop->close();       // WA_DeleteOnClose，随后自销毁
+    }
+    setPopupOpen(false);
     QComboBox::hidePopup();
 }
 
-void StyledComboBox::popupTab() {
-    showPopup();
+void StyledComboBox::hideEvent(QHideEvent* e) {
+    hidePopup();            // 下拉框被隐藏/切页时不要留下浮层
+    QComboBox::hideEvent(e);
 }
 
-void ElideRightDelegate::initStyleOption(QStyleOptionViewItem* option,
-                                         const QModelIndex& index) const {
-    QStyledItemDelegate::initStyleOption(option, index);
-    option->textElideMode = Qt::ElideRight;
-}
+QPoint StyledComboBox::popupTopLeft(const QSize& popupSize) const {
+    const QRect box(mapToGlobal(QPoint(0, 0)), size());
+    const QWidget* top = window();
+    const QRect win = top ? top->frameGeometry() : box;   // 主窗口（或对话框）边界
 
-PortComboBox::PortComboBox(QWidget* parent) : StyledComboBox(parent) {
-    setItemDelegate(new ElideRightDelegate(this));
-    setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    const int pad = ListPopup::kPad;
+    const int gap = 4;
+
+    // 卡片左边缘与下拉框左边缘对齐（浮层左侧有 pad 宽透明留白）
+    int x = box.left() - pad;
+    int y = (box.bottom() + gap + popupSize.height() - pad <= win.bottom())
+                ? box.bottom() + gap - pad      // 向下展开
+                : box.top() - popupSize.height() + pad;   // 向上贴着下拉框顶边
+
+    // 钳到主窗口内：留白可以略微溢出，卡片本体不越界
+    const QRect allow = win.adjusted(-pad, -pad, pad, pad);
+    if (x + popupSize.width() > allow.right() + 1)
+        x = allow.right() + 1 - popupSize.width();
+    if (x < allow.left())
+        x = allow.left();
+    if (y + popupSize.height() > allow.bottom() + 1)
+        y = allow.bottom() + 1 - popupSize.height();
+    if (y < allow.top())
+        y = allow.top();
+    return QPoint(x, y);
 }

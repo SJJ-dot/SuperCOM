@@ -50,6 +50,7 @@ ThemeColors themeDark() {
     t["cs_bg"]           = QStringLiteral("rgba(250,179,135,45)");
     t["link_color"]      = QStringLiteral("#89B4FA");
     t["accent"]          = QStringLiteral("#89B4FA");
+    t["accent_fg"]       = QStringLiteral("#1E1E2E");   // 强调色上的文字（深色主题：强调色偏亮，用深字）
     t["progress_bg"]     = QStringLiteral("#24273A");   // 进度条未填充背景（深色主题）
     t["progress_chunk"]  = QStringLiteral("#1E66F5");   // 进度条填充（深色主题：深蓝，配白字）
     t["progress_text"]   = QStringLiteral("#FFFFFF");   // 进度条文字（深色主题：白字）
@@ -104,6 +105,7 @@ ThemeColors themeLight() {
     t["cs_bg"]           = QStringLiteral("#FFF3E0");
     t["link_color"]      = QStringLiteral("#1E66F5");
     t["accent"]          = QStringLiteral("#1E66F5");
+    t["accent_fg"]       = QStringLiteral("#FFFFFF");   // 强调色上的文字（浅色主题：强调色偏深，用白字）
     t["progress_bg"]     = QStringLiteral("#DCE0E8");   // 进度条未填充背景（浅色主题：浅灰）
     t["progress_chunk"]  = QStringLiteral("#89B4FA");   // 进度条填充（浅色主题：浅蓝，配深字）
     t["progress_text"]   = QStringLiteral("#4C4F69");   // 进度条文字（浅色主题：深灰字）
@@ -154,12 +156,21 @@ QPushButton#btnHistory{background-color:#209FB5;color:#FFFFFF;border-color:#209F
 QPushButton#btnHistory:hover{background-color:#1B8799;}
 QLineEdit{background-color:{input_bg};color:{text_primary};border:1px solid {input_border};border-radius:5px;padding:2px 6px;}
 QLineEdit:focus{border-color:{accent};}
-QComboBox{background-color:{input_bg};color:{text_primary};border:1px solid {input_border};border-radius:5px;padding:2px 8px;}
-QComboBox:hover{border-color:{accent};}
-QComboBox::drop-down{border:none;subcontrol-origin:padding;subcontrol-position:top right;width:20px;}
+/* 下拉框：外观与输入框统一（箭头由 StyledComboBox 自绘，故关闭原生箭头）。
+   弹出列表不再用 Qt 原生弹层，改由自绘的 ListPopup 呈现（与快捷命令浮层同一套），
+   故这里不再需要 QComboBox QAbstractItemView 相关规则。 */
+QComboBox{background-color:{input_bg};color:{text_primary};border:1px solid {input_border};border-radius:5px;padding:1px 4px 1px 7px;min-height:20px;}
+QComboBox:hover{border-color:{panel_border};}
+QComboBox:on, QComboBox:focus, QComboBox[popupOpen="true"]{border-color:{accent};}
+QComboBox:disabled{color:{text_secondary};border-color:{panel_border};}
+QComboBox::drop-down{subcontrol-origin:padding;subcontrol-position:center right;width:20px;border:none;background:transparent;}
 QComboBox::down-arrow{image:none;width:0;height:0;}
-QComboBox QAbstractItemView{background-color:{combo_item_bg};color:{text_primary};selection-background-color:{combo_item_sel};border:1px solid {input_border};}
-QComboBox QAbstractItemView::item:selected{background-color:{combo_item_sel};color:{text_primary};border-left:3px solid {accent};}
+/* 菜单（右键菜单 / 快捷命令分组下拉）：与下拉弹出列表统一 */
+QMenu{background-color:{menu_bg};color:{menu_fg};border:1px solid {input_border};padding:4px;}
+QMenu::item{background:transparent;padding:5px 18px 5px 26px;border-radius:4px;margin:1px 2px;}
+QMenu::item:selected{background-color:{accent};color:{accent_fg};}
+QMenu::item:disabled{color:{text_secondary};}
+QMenu::separator{height:1px;background:{panel_border};margin:4px 8px;}
 QTextEdit{background-color:{edit_bg};color:{edit_fg};selection-background-color:{edit_sel};border:none;}
 QTextEdit#txt_send{background-color:{edit_send_bg};border:1px solid {input_border};border-radius:5px;padding:3px 6px;}
 QProgressBar{background-color:{progress_bg};border:1px solid {input_border};border-radius:3px;text-align:center;color:{progress_text};}
@@ -174,9 +185,6 @@ QListWidget::item{padding:2px 6px;}
 QListWidget::item:selected{background-color:{list_sel};color:{text_primary};}
 QScrollArea{border:none;background:transparent;}
 QScrollArea > QWidget > QWidget{background:transparent;}
-QMenu{background-color:{menu_bg};color:{menu_fg};border:1px solid {input_border};}
-QMenu::item{padding:4px 18px;background:transparent;}
-QMenu::item:selected{background-color:{menu_sel};}
 QScrollBar:vertical{background:transparent;width:10px;margin:0;}
 QScrollBar::handle:vertical{background:{scrollbar_handle};border-radius:5px;min-height:24px;}
 QScrollBar::handle:vertical:hover{background:{scrollbar_hover};}
@@ -195,13 +203,11 @@ QToolButton#searchNav:hover, QToolButton#searchClose:hover{background:{btn_hover
 /* 标签页右上角 + 按钮 */
 QToolButton#tabCornerPlus{background:transparent;color:{accent};border:1px solid {accent};border-radius:11px;font-size:14px;font-weight:bold;padding:0;margin:0 2px;}
 QToolButton#tabCornerPlus:hover{background:{accent};color:#FFFFFF;}
-/* 选项卡右上角下拉箭头（QToolButton，弹出 Qt::ToolTip QListWidget） */
-QToolButton#tabDropdown{background:{btn_bg};color:{accent};border:1px solid {panel_border};border-radius:3px;font-size:12px;font-weight:bold;padding:2px 1px;margin:0;min-width:18px;max-width:20px;}
-QToolButton#tabDropdown:hover{background:{accent};color:#FFFFFF;border-color:{accent};}
-/* 选项卡下拉弹窗（Qt::ToolTip QListWidget） */
-QListWidget#tabPopup{background:{panel_bg};color:{text};border:1px solid {panel_border};padding:4px;outline:0;}
-QListWidget#tabPopup::item{padding:4px 8px;}
-QListWidget#tabPopup::item:selected{background:{accent};color:#FFFFFF;}
+/* 选项卡右上角下拉箭头：小号图标按钮（默认浅底描边，悬停加深，展开时主色） */
+QToolButton#tabDropdown{background:{btn_bg};color:{text_secondary};border:1px solid {panel_border};border-radius:5px;font-size:10px;padding:0;}
+QToolButton#tabDropdown:hover{background:{btn_hover};color:{accent};border-color:{panel_border};}
+QToolButton#tabDropdown:pressed{background:{btn_hover};color:{accent};}
+QToolButton#tabDropdown:checked{background:{accent};color:#FFFFFF;border-color:{accent};}
 #statusBar{background-color:{status_bg};color:{status_fg};border-top:1px solid {status_border};}
 #statusBar QLabel{color:{status_fg};background:transparent;}
 QFrame#cs_group{border:none;background:transparent;}

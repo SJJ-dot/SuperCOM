@@ -16,6 +16,9 @@ Q_IMPORT_PLUGIN(QModernWindowsStylePlugin)      // Windows 原生样式
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("SuperCOM"));
+    // 关闭下拉框弹出动画：QComboBox 在 SH_ComboBox_Popup=0 时会用 qScrollEffect
+    // 播放"向下滚动展开"动画，与自定义弹窗定位叠加会出现"先向下展开再换向"的观感。
+    QApplication::setEffectEnabled(Qt::UI_AnimateCombo, false);
     // 统一控件文字字号 = 接收区数据文本字号（10pt），字体族保持系统默认（中文正常显示）
     QFont f = app.font();
     f.setPointSize(10);

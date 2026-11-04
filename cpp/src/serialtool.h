@@ -12,6 +12,7 @@
 #include <QPair>
 #include <QVariantMap>
 #include <QJsonArray>
+#include <QPointer>
 
 #include "themes.h"
 #include "combobox.h"
@@ -31,6 +32,7 @@ class QProgressBar;
 class QToolButton;
 class QDialog;
 class QFrame;
+class QMenu;
 class QGroupBox;
 class QVBoxLayout;
 class QHBoxLayout;
@@ -85,7 +87,6 @@ protected:
 private:
     // ---------- UI 构建 ----------
     void buildUi();
-    void buildHistoryTab();
 
     // ---------- 主题 ----------
     void applyTheme(const QString& themeName);
@@ -192,8 +193,8 @@ private:
     void setActiveMsGroup(int g);        // 设定活动分组（循环发送目标 + 高亮）
     void applyMsActiveStyle();           // 重绘分组高亮边框
     void cycleMsTab(int dir);            // 选项卡按顺序切换（dir=-1前/1后）
-    void showTabDropdown();             // 弹出选项卡列表（Qt::ToolTip QListWidget + 全局事件过滤器）
-    void hideTabPopup();               // 隐藏选项卡下拉弹窗
+    void showTabDropdown();             // 展开/收起选项卡列表浮层（显示在按钮左侧）
+    void hideTabPopup();                // 收起选项卡列表浮层并复位按钮状态
     void startMsLoop();
     void msLoopTick();
     void stopMsLoop();
@@ -244,7 +245,8 @@ private:
     QPushButton* m_btnScrollBottom = nullptr; // 接收区右下角"回到底部"悬浮按钮（离开底部时显示）
     QTabWidget* m_msTabs = nullptr;
     QToolButton* m_tabDropdownBtn = nullptr;       // 选项卡右侧下拉箭头
-    QListWidget* m_tabPopup = nullptr;             // 选项卡下拉弹窗（Qt::ToolTip + 全局事件过滤器，和搜索历史弹窗同方案）
+    QPointer<QWidget> m_tabPopup;                  // 当前展开的选项卡列表浮层（再次点击收起）
+    qint64 m_tabPopupClosedAt = 0;                 // 浮层最近一次关闭时刻（ms），用于吞掉紧随其后的重复点击
     QListWidget* m_histList = nullptr;
     QWidget* m_msPanel = nullptr;        // 右侧面板容器（顶部工具栏 + 选项卡）
 

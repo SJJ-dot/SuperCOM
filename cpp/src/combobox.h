@@ -1,54 +1,48 @@
 #pragma once
-// 主题化下拉框：在右侧叠加 QLabel 显示箭头（绕开 Qt 对 QSS 图标的兼容问题）。
-// PortComboBox：端口下拉，宽度不足时末尾硬截断，弹出列表项末尾省略号、按内容宽度展开。
-
+#include <QColor>
 #include <QComboBox>
-#include <QLabel>
-#include <QStyledItemDelegate>
+#include <QtGlobal>
+#include <QPointer>
+#include <QRect>
 
-class PopupPressEnforceFilter;
-class PopupFallbackFilter;
-class PopupHoverFilter;
-class PopupGlobalMouseFilter;
+#include "listpopup.h"
+#include "themes.h"
 
+// 统一样式的下拉框：
+// 1) 外观由全局 QSS（themes.cpp）绘制，箭头由本类自绘（保证深浅主题都清晰）；
+// 2) 弹层换成自绘的 ListPopup，与快捷命令分组浮层同一套（半透明窗口 + 留白 +
+//    圆角卡片）。原生 QComboBox 弹层由平台绘制，圆角、留白、阴影各系统表现不一，
+//    Windows 高 DPI 下圆角切口还会露出窗口底色（看起来像右下角黑角），故弃用。
 class StyledComboBox : public QComboBox {
     Q_OBJECT
 public:
     explicit StyledComboBox(QWidget* parent = nullptr);
-    void setArrowColor(const QColor& c);
-    void popupTab();   // 公开包装：showPopup 给 tab 下拉用
 
-protected:
-    void resizeEvent(QResizeEvent* e) override;
-    // 修复 popup 超出主窗口部分单击无效：
-    // 1) 去掉 WS_EX_LAYERED 恢复矩形命中测试；
-    // 2) Press 时强制 setCurrentIndex(点击项)，绕开 Qt 内部 currentIndex 不更新的问题；
-    // 3) Release 后 popup 仍开则兜底手动选中；
-    // 4) MouseMove 手动跟随高亮（Qt 容器 filter 在主窗口外 indexAt 失效）。
-    // 5) 全局鼠标拦截（qApp 级）：popup viewport 在 DWM 无边框透明窗口下超出
-    //    主窗口边界收不到鼠标事件，改用全局拦截 + mapFromGlobal 换算 viewport 坐标。
+    // 跟随主题刷新箭头颜色
+    void setThemeColors(const sjj::ThemeColors& t);
+
     void showPopup() override;
     void hidePopup() override;
 
-private:
-    QLabel* m_arrow = nullptr;
-    PopupPressEnforceFilter* m_pressEnforceFilter = nullptr;
-    PopupFallbackFilter* m_fallbackFilter = nullptr;
-    PopupHoverFilter* m_hoverFilter = nullptr;
-    PopupGlobalMouseFilter* m_globalMouseFilter = nullptr;
-};
-
-// 弹出列表项：省略号在末尾
-class ElideRightDelegate : public QStyledItemDelegate {
-public:
-    using QStyledItemDelegate::QStyledItemDelegate;
 protected:
-    void initStyleOption(QStyleOptionViewItem* option, const QModelIndex& index) const override;
+    void paintEvent(QPaintEvent* e) override;
+    void hideEvent(QHideEvent* e) override;
+
+private:
+    // 弹层左上角（含四周留白）：默认贴下拉框下方，放不下再翻到上方，并钳在主窗口内
+    QPoint popupTopLeft(const QSize& popupSize) const;
+    // 展开时给下拉框加高亮边框（等价于原生弹层的 :on 状态）
+    void setPopupOpen(bool open);
+
+    QColor m_arrowColor;
+    QPointer<ListPopup> m_popup;
+    // 弹层关闭时刻：用于吞掉"关闭那一次点击"连带产生的立刻重开请求
+    qint64 m_popupClosedAtMs = 0;
 };
 
-// 端口号下拉：收起时末尾硬截断；弹出时按内容宽度展开
+// 端口号下拉（样式与通用下拉一致）
 class PortComboBox : public StyledComboBox {
     Q_OBJECT
 public:
-    explicit PortComboBox(QWidget* parent = nullptr);
+    explicit PortComboBox(QWidget* parent = nullptr) : StyledComboBox(parent) {}
 };
