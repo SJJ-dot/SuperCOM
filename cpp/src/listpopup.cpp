@@ -41,7 +41,8 @@ ListPopup::ListPopup(const QStringList& items, int current, const sjj::ThemeColo
     m_accentFg    = c.value(QStringLiteral("accent_fg"));
     m_hoverBg     = c.value(QStringLiteral("list_sel"));
     m_itemBorder  = c.value(QStringLiteral("panel_border"));
-    const QString bg     = c.value(QStringLiteral("combo_item_bg"));
+    m_itemBg      = c.value(QStringLiteral("combo_item_bg"));
+    const QString bg     = c.value(QStringLiteral("popup_bg"));
     const QString border = c.value(QStringLiteral("input_border"));
 
     auto* outer = new QVBoxLayout(this);
@@ -139,12 +140,13 @@ void ListPopup::applyCurrent() {
         m_rows.at(i)->setObjectName(cur ? QStringLiteral("listPopupRowCur")
                                         : QStringLiteral("listPopupRow"));
         // 重新设置样式表会触发重新 polish，objectName 变化才能立即生效。
-        // 每行带一条细描边 + 2px 间距 -> 像一张张层叠的小卡片，item 之间有了层次。
+        // 未选中项 = 白（深色下为略亮的表面色）卡片，配细描边 + 2px 间距，浮在弹窗
+        // 底板上形成层次；悬停用 list_sel；当前项为强调色实心卡片。
         m_rows.at(i)->setStyleSheet(QStringLiteral(
-            "QWidget#listPopupRow{background:transparent;border:1px solid %1;border-radius:4px;}"
+            "QWidget#listPopupRow{background:%3;border:1px solid %1;border-radius:4px;}"
             "QWidget#listPopupRow:hover{background:%2;border:1px solid %1;border-radius:4px;}"
-            "QWidget#listPopupRowCur{background:%3;border:1px solid %3;border-radius:4px;}")
-            .arg(m_itemBorder, m_hoverBg, m_accentColor));
+            "QWidget#listPopupRowCur{background:%4;border:1px solid %4;border-radius:4px;}")
+            .arg(m_itemBorder, m_hoverBg, m_itemBg, m_accentColor));
 
         QFont f = m_labels.at(i)->font();
         f.setBold(cur);

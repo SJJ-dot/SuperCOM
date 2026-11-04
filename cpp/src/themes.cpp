@@ -32,7 +32,8 @@ ThemeColors themeDark() {
     t["btn_fg"]          = QStringLiteral("#CDD6F4");
     t["input_bg"]        = QStringLiteral("#181825");
     t["input_border"]    = QStringLiteral("#45475A");
-    t["combo_item_bg"]   = QStringLiteral("#1E1E2E");
+    t["popup_bg"]        = QStringLiteral("#1E1E2E");   // 弹窗卡片底板（与深色窗口底色 win_bg 一致）
+    t["combo_item_bg"]   = QStringLiteral("#24273A");   // 弹窗条目卡片背景（比底板略亮的表面色，形成层次）
     t["combo_item_sel"]  = QStringLiteral("#585B70");   // 深色下拉选中背景：surface2（#24273A 对比太弱不可见，#313244 也弱；#585B70 明显但不刺眼）
     t["list_bg"]         = QStringLiteral("#181825");
     t["list_sel"]        = QStringLiteral("#313244");
@@ -87,7 +88,8 @@ ThemeColors themeLight() {
     t["btn_fg"]          = QStringLiteral("#4C4F69");
     t["input_bg"]        = QStringLiteral("#FFFFFF");
     t["input_border"]    = QStringLiteral("#CCD0DA");
-    t["combo_item_bg"]   = QStringLiteral("#FFFFFF");
+    t["popup_bg"]        = QStringLiteral("#EFF1F5");   // 弹窗卡片底板（与浅色窗口底色 win_bg 一致）
+    t["combo_item_bg"]   = QStringLiteral("#FFFFFF");   // 弹窗条目卡片背景（白色）
     t["combo_item_sel"]  = QStringLiteral("#EFF1F5");   // 浅色下拉选中背景（用户指定，与 win_bg 一致）
     t["list_bg"]         = QStringLiteral("#FFFFFF");
     t["list_sel"]        = QStringLiteral("#E6E9EF");

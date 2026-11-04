@@ -45,5 +45,6 @@ private:
     QString m_accentColor;
     QString m_accentFg;
     QString m_hoverBg;
+    QString m_itemBg;       // 未选中 item 的卡片底色（浅色=白，深色=略亮表面色）
     QString m_itemBorder;   // 单条 item 的细描边（比外层卡片更浅，形成层叠卡片层次）
 };
