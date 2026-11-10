@@ -120,6 +120,64 @@ QByteArray parseHexString(const QString& raw, bool& ok, QString& err) {
     return QByteArray::fromHex(s.toLatin1());
 }
 
+QByteArray parseEscapeBytes(const QString& raw, bool& ok, QString& err) {
+    ok = true;
+    QByteArray out;
+    QString literal;   // 连续字面字符整体按 UTF-8 编码，避免拆散代理对
+    auto flush = [&] {
+        if (!literal.isEmpty()) {
+            out += literal.toUtf8();
+            literal.clear();
+        }
+    };
+    for (qsizetype i = 0; i < raw.size(); ++i) {
+        const QChar ch = raw.at(i);
+        if (ch != QLatin1Char('\\')) {
+            literal += ch;
+            continue;
+        }
+        flush();
+        if (++i >= raw.size()) {
+            ok = false;
+            err = QStringLiteral("分隔符结尾的 '\\' 不完整");
+            return {};
+        }
+        const QChar e = raw.at(i);
+        switch (e.unicode()) {
+        case 'r': out.append('\r'); break;
+        case 'n': out.append('\n'); break;
+        case 't': out.append('\t'); break;
+        case '0': out.append('\0'); break;
+        case '\\': out.append('\\'); break;
+        case 'x': {
+            // \xNN：最多 2 位十六进制，紧随其后的十六进制数字都算进这个字节
+            QString hex;
+            while (hex.size() < 2 && i + 1 < raw.size()) {
+                const ushort u = raw.at(i + 1).unicode();
+                const bool isHex = (u >= '0' && u <= '9') || (u >= 'a' && u <= 'f')
+                                   || (u >= 'A' && u <= 'F');
+                if (!isHex)
+                    break;
+                hex += raw.at(++i);
+            }
+            if (hex.isEmpty()) {
+                ok = false;
+                err = QStringLiteral("\\x 后必须跟 1~2 位十六进制数字，如 \\x0A");
+                return {};
+            }
+            out.append(char(hex.toUInt(nullptr, 16)));
+            break;
+        }
+        default:
+            ok = false;
+            err = QStringLiteral("不支持的转义：\\%1（可用 \\r \\n \\t \\0 \\\\ \\xNN）").arg(e);
+            return {};
+        }
+    }
+    flush();
+    return out;
+}
+
 QString spacedHex(const QByteArray& data) {
     QString out;
     out.reserve(data.size() * 3);

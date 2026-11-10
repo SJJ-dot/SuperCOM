@@ -111,7 +111,9 @@ private:
     void showSettingsDialog();
     void applySettings(QDialog* dlg, QComboBox* cmbBaud, QComboBox* cmbDatabits,
                        QComboBox* cmbStopbits, QComboBox* cmbParity,
-                       QComboBox* cmbFlow, QLineEdit* entryTimeout);
+                       QComboBox* cmbFlow, QLineEdit* entryTimeout,
+                       ThemeCheckBox* chkSplitTime, ThemeCheckBox* chkSplitChar,
+                       QLineEdit* entrySplitPattern);
     void onPortChanged(int idx);
     void onBaudChanged(int idx);
     void applySerialSettings();
@@ -119,6 +121,7 @@ private:
     void openPort();
     void closePort();
     void onSerialData();
+    void feedRxData(const QByteArray& data);  // 分包入口：按时间/字符规则把收到的数据切成 rx 记录
     void onSerialError(QSerialPort::SerialPortError err);
     void onFileBytesWritten(qint64 bytes);
     void refreshStatus();
@@ -152,7 +155,10 @@ private:
     void scrollRecvToBottom();       // 一键回到底部并恢复刷新（右下角悬浮按钮）
     void positionScrollBottomBtn();  // 把悬浮按钮定位到滚动条下方（跟随窗口缩放）
     void drainRx();
-    void flushRxPacket();   // 按读超时空闲分包：把待分包缓存作为一条 rx 记录送出
+    bool updateSplitPattern(const QString& text, QString& err); // 解析分隔符文本并应用
+    void emitRxPacket(const QByteArray& bytes, const QString& ts); // 送出一条 rx 记录
+    void splitRxByPattern();  // 按分隔符把 m_rxBuf 中的完整包逐条切出（分隔符含在包内）
+    void flushRxPacket();   // 把待分包缓存剩余部分作为一条 rx 记录送出
     void clearRecv();
     void saveRecv();
 
@@ -359,8 +365,13 @@ private:
     QString m_flow = QStringLiteral("None");
     QString m_readTimeout = QStringLiteral("50");   // 读超时(ms)：接收空闲超时分包阈值
 
-    // 按读超时空闲分包状态：字节先攒进缓存，数据流停顿超过 m_readTimeout 才作为一条
-    // （防内存撑爆：缓存达到 MAX_RX_BUF 立即强制分包，无论是否空闲）
+    // 接收分包方式：两种可单独或同时启用，任一条件满足即切出一条。默认只按时间。
+    bool m_splitByTime = true;
+    bool m_splitByChar = false;
+    QString m_splitPatternText = QStringLiteral("\\r\\n");  // 分隔符原文（含转义，存配置）
+    QByteArray m_splitPattern = QByteArrayLiteral("\r\n"); // 解析后的分隔符字节
+
+    // 分包缓存：字节先攒进 m_rxBuf，超时/分隔符/缓存上限触发时切出一条
     QByteArray m_rxBuf;
     QString m_pktStartTs;                 // 当前包首字节到达时刻（作该条时间戳）
     QTimer* m_pktTimer = nullptr;         // 分包空闲定时器（singleShot）

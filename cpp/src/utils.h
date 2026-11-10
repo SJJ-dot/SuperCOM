@@ -83,6 +83,9 @@ QString hexBody(const QByteArray& data);
 // 解析发送框 HEX 文本（去空格/逗号/换行/0x 前缀；偶数长度校验）
 // 失败时 ok=false 且 err 含中文错误信息
 QByteArray parseHexString(const QString& raw, bool& ok, QString& err);
+// 把「分包分隔符」文本转成字节：支持 \r \n \t \0 \\ \xNN 转义，
+// 其余字符按 UTF-8 编码。非法转义/残缺 \xNN 时 ok=false 且 err 含中文错误信息。
+QByteArray parseEscapeBytes(const QString& raw, bool& ok, QString& err);
 // 字节数组 → "AB CD" 大写空格分隔
 QString spacedHex(const QByteArray& data);
 
