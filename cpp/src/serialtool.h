@@ -112,7 +112,8 @@ private:
     void applySettings(QDialog* dlg, QComboBox* cmbBaud, QComboBox* cmbDatabits,
                        QComboBox* cmbStopbits, QComboBox* cmbParity,
                        QComboBox* cmbFlow, QLineEdit* entryTimeout,
-                       ThemeCheckBox* chkSplitTime, ThemeCheckBox* chkSplitChar,
+                       ThemeCheckBox* chkSplitTime, ThemeCheckBox* chkForceTime,
+                       QLineEdit* entryForceSeconds, ThemeCheckBox* chkSplitChar,
                        QLineEdit* entrySplitPattern);
     void onPortChanged(int idx);
     void onBaudChanged(int idx);
@@ -157,6 +158,7 @@ private:
     void drainRx();
     bool updateSplitPattern(const QString& text, QString& err); // 解析分隔符文本并应用
     void emitRxPacket(const QByteArray& bytes, const QString& ts); // 送出一条 rx 记录
+    void restartForceTimer(); // 新包开始：重新起算「最长读取秒数」强制分包计时
     void splitRxByPattern();  // 按分隔符把 m_rxBuf 中的完整包逐条切出（分隔符含在包内）
     void flushRxPacket();   // 把待分包缓存剩余部分作为一条 rx 记录送出
     void clearRecv();
@@ -365,9 +367,11 @@ private:
     QString m_flow = QStringLiteral("None");
     QString m_readTimeout = QStringLiteral("50");   // 读超时(ms)：接收空闲超时分包阈值
 
-    // 接收分包方式：两种可单独或同时启用，任一条件满足即切出一条。默认只按时间。
-    bool m_splitByTime = true;
-    bool m_splitByChar = false;
+    // 接收分包方式：三种可任意组合，任一条件满足即切出一条。默认只按空闲超时。
+    bool m_splitByTime = true;      // 空闲超时：数据流停顿超过 m_readTimeout
+    bool m_forceByTime = false;     // 强制分包：从包首字节起满 N 秒，不管数据是否连续
+    bool m_splitByChar = false;     // 按分隔符
+    double m_forceSeconds = 1.0;    // 强制分包时长（秒）
     QString m_splitPatternText = QStringLiteral("\\r\\n");  // 分隔符原文（含转义，存配置）
     QByteArray m_splitPattern = QByteArrayLiteral("\r\n"); // 解析后的分隔符字节
 
@@ -375,6 +379,7 @@ private:
     QByteArray m_rxBuf;
     QString m_pktStartTs;                 // 当前包首字节到达时刻（作该条时间戳）
     QTimer* m_pktTimer = nullptr;         // 分包空闲定时器（singleShot）
+    QTimer* m_forceTimer = nullptr;       // 最长读取时长定时器（singleShot，到点强制切包）
     QTimer* m_portPollTimer = nullptr;   // 串口热插拔轮询（2s 周期）
     QStringList m_lastPortDevs;           // 上次检测到的端口名集合（用于变更比较）
     // 分包上限 64KB：单条记录变小，50ms 刷入更均匀，

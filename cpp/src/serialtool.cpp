@@ -112,10 +112,15 @@ SerialTool::SerialTool(QWidget* parent) : QWidget(parent) {
     connect(m_flushTimer, &QTimer::timeout, this, &SerialTool::drainRx);
     m_flushTimer->start(50);
 
-    // 分包：空闲超时 / 指定分隔符，两种可同时启用，任一条件满足即切出一条
+    // 分包：空闲超时 / 最长读取时长 / 指定分隔符，三者可任意组合，任一满足即切一条
     m_pktTimer = new QTimer(this);
     m_pktTimer->setSingleShot(true);
     connect(m_pktTimer, &QTimer::timeout, this, &SerialTool::flushRxPacket);
+    // 强制分包计时只在「新包开始」时启动，中途持续来数据不重置，
+    // 所以连续数据流也会在满 N 秒时被切出一条。
+    m_forceTimer = new QTimer(this);
+    m_forceTimer->setSingleShot(true);
+    connect(m_forceTimer, &QTimer::timeout, this, &SerialTool::flushRxPacket);
 
     // 串口热插拔自动检测：每 2 秒轮询端口列表，变化时才刷新 UI
     m_portPollTimer = new QTimer(this);
@@ -1310,7 +1315,7 @@ void SerialTool::showSettingsDialog() {
     cmbFlow->setCurrentText(m_flow);
     form->addRow(QStringLiteral("流控:"), cmbFlow);
 
-    // ---- 接收数据分包：两种方式可单独或同时启用，任一条件满足即切出一条 ----
+    // ---- 接收数据分包：三种方式可任意组合，任一条件满足即切出一条 ----
     auto* splitTitle = new QLabel(QStringLiteral("—— 接收数据分包 ——"), dlg);
     splitTitle->setAlignment(Qt::AlignCenter);
     form->addRow(splitTitle);
@@ -1325,10 +1330,20 @@ void SerialTool::showSettingsDialog() {
     entryTimeout->setToolTip(chkSplitTime->toolTip());
     form->addRow(chkSplitTime, entryTimeout);
 
+    auto* chkForceTime = new ThemeCheckBox(QStringLiteral("强制分包(s):"), dlg);
+    chkForceTime->setToolTip(QStringLiteral(
+        "勾选＝启用定时强制分包：从一条数据的首字节到达开始计时，满指定秒数立即切出一条，\n"
+        "即使数据流一直连续、也没有分隔符（中途持续来数据不会重新计时）。\n"
+        "可与其它方式同时勾选，谁先满足谁切。"));
+    chkForceTime->setChecked(m_forceByTime);
+    auto* entryForceSeconds = new QLineEdit(QString::number(m_forceSeconds, 'g', 6), dlg);
+    entryForceSeconds->setToolTip(chkForceTime->toolTip());
+    form->addRow(chkForceTime, entryForceSeconds);
+
     auto* chkSplitChar = new ThemeCheckBox(QStringLiteral("分隔符:"), dlg);
     chkSplitChar->setToolTip(QStringLiteral(
         "勾选＝启用按字符分包：数据流中出现该分隔符时立即切出一条；\n"
-        "可与超时同时勾选，谁先满足谁切。两种方式都不勾选时按空闲超时分包。"));
+        "可与其它方式同时勾选，谁先满足谁切。三种方式都不勾选时按空闲超时分包。"));
     chkSplitChar->setChecked(m_splitByChar);
     auto* entrySplitPattern = new QLineEdit(m_splitPatternText, dlg);
     entrySplitPattern->setToolTip(QStringLiteral(
@@ -1342,29 +1357,37 @@ void SerialTool::showSettingsDialog() {
     auto* ok = new QPushButton(QStringLiteral("确定"), dlg);
     connect(ok, &QPushButton::clicked, this,
             [this, dlg, cmbBaud, cmbDatabits, cmbStopbits, cmbParity, cmbFlow,
-             entryTimeout, chkSplitTime, chkSplitChar, entrySplitPattern] {
+             entryTimeout, chkSplitTime, chkForceTime, entryForceSeconds,
+             chkSplitChar, entrySplitPattern] {
                 applySettings(dlg, cmbBaud, cmbDatabits, cmbStopbits, cmbParity,
-                              cmbFlow, entryTimeout, chkSplitTime, chkSplitChar,
-                              entrySplitPattern);
+                              cmbFlow, entryTimeout, chkSplitTime, chkForceTime,
+                              entryForceSeconds, chkSplitChar, entrySplitPattern);
             });
     btns->addWidget(ok);
     auto* cancel = new QPushButton(QStringLiteral("取消"), dlg);
     connect(cancel, &QPushButton::clicked, dlg, &QDialog::close);
     btns->addWidget(cancel);
     form->addRow(btns);
-    dlg->resize(360, 320);
+    dlg->resize(360, 350);
     dlg->show();
 }
 
 void SerialTool::applySettings(QDialog* dlg, QComboBox* cmbBaud, QComboBox* cmbDatabits,
                                QComboBox* cmbStopbits, QComboBox* cmbParity,
                                QComboBox* cmbFlow, QLineEdit* entryTimeout,
-                               ThemeCheckBox* chkSplitTime, ThemeCheckBox* chkSplitChar,
+                               ThemeCheckBox* chkSplitTime, ThemeCheckBox* chkForceTime,
+                               QLineEdit* entryForceSeconds, ThemeCheckBox* chkSplitChar,
                                QLineEdit* entrySplitPattern) {
     bool ok = false;
     const int t = entryTimeout->text().toInt(&ok);
     if (!ok || t < 1) {
         QMessageBox::critical(this, QStringLiteral("错误"), QStringLiteral("读超时必须是正整数"));
+        return;
+    }
+    const double sec = entryForceSeconds->text().toDouble(&ok);
+    if (!ok || sec <= 0 || sec > 3600) {
+        QMessageBox::critical(this, QStringLiteral("错误"),
+                              QStringLiteral("强制分包秒数必须是 0~3600 之间的正数"));
         return;
     }
     cmbBaud->currentText().toInt(&ok);
@@ -1391,6 +1414,8 @@ void SerialTool::applySettings(QDialog* dlg, QComboBox* cmbBaud, QComboBox* cmbD
 
     m_readTimeout = QString::number(t);
     m_splitByTime = chkSplitTime->isChecked();
+    m_forceByTime = chkForceTime->isChecked();
+    m_forceSeconds = sec;
     m_splitByChar = chkSplitChar->isChecked();
     m_splitPatternText = patText;
     m_splitPattern = pat;
@@ -1499,6 +1524,7 @@ void SerialTool::openPort() {
     m_rxBuf.clear();
     m_pktStartTs.clear();
     m_pktTimer->stop();
+    m_forceTimer->stop();
     m_btnOpen->setText(QStringLiteral("关闭串口"));
     m_btnOpen->setObjectName(QStringLiteral("btnDisconnect"));
     m_btnOpen->style()->unpolish(m_btnOpen);
@@ -1552,9 +1578,13 @@ void SerialTool::onSerialData() {
 void SerialTool::feedRxData(const QByteArray& data) {
     if (data.isEmpty())
         return;
-    if (m_rxBuf.isEmpty())
+    const bool fresh = m_rxBuf.isEmpty();
+    if (fresh)
         m_pktStartTs = sjj::nowTimestamp();   // 包首字节到达时刻作该条时间戳
     m_rxBuf += data;
+    // 强制分包从包首字节起算：仅在新包开始时启动计时，中途持续来数据不重置
+    if (fresh)
+        restartForceTimer();
 
     // 按字符分包：分隔符出现即把完整包切出，未收完的部分仍留在 m_rxBuf，
     // 因此分隔符被拆到两次 readyRead 里也能正确匹配。
@@ -1562,9 +1592,10 @@ void SerialTool::feedRxData(const QByteArray& data) {
     if (byChar)
         splitRxByPattern();
 
-    // 按时间分包：有残留就重置空闲计时。两种都没启用时兜底按时间，
-    // 避免数据一直攒在缓存里不显示。
-    const bool byTime = m_splitByTime || !byChar;
+    // 空闲超时：有残留就重置计时。三种方式都没启用时兜底按空闲超时，
+    // 避免数据一直攒在缓存里不显示；只开强制分包时不要启用它，
+    // 否则 50ms 空闲就先切包，强制分包永远等不到。
+    const bool byTime = m_splitByTime || (!byChar && !m_forceByTime);
     if (!m_rxBuf.isEmpty() && byTime)
         m_pktTimer->start(qMax(1, m_readTimeout.toInt()));
     else
@@ -1595,6 +1626,18 @@ void SerialTool::splitRxByPattern() {
     }
     m_rxBuf = m_rxBuf.mid(start);
     m_pktStartTs = m_rxBuf.isEmpty() ? QString() : ts;
+    // 切出的包已结束；若还剩数据，它是下一条包的开头，强制分包计时重新起算
+    restartForceTimer();
+}
+
+void SerialTool::restartForceTimer() {
+    if (!m_forceTimer)
+        return;
+    if (!m_forceByTime || m_rxBuf.isEmpty()) {
+        m_forceTimer->stop();
+        return;
+    }
+    m_forceTimer->start(qBound(1, int(m_forceSeconds * 1000.0), 24 * 3600 * 1000));
 }
 
 void SerialTool::emitRxPacket(const QByteArray& bytes, const QString& ts) {
@@ -1611,6 +1654,8 @@ void SerialTool::emitRxPacket(const QByteArray& bytes, const QString& ts) {
 
 void SerialTool::flushRxPacket() {
     m_pktTimer->stop();
+    if (m_forceTimer)
+        m_forceTimer->stop();
     if (m_rxBuf.isEmpty())
         return;
     emitRxPacket(m_rxBuf, m_pktStartTs.isEmpty() ? sjj::nowTimestamp() : m_pktStartTs);
@@ -2288,6 +2333,8 @@ void SerialTool::clearRecv() {
     m_pktStartTs.clear();
     if (m_pktTimer)
         m_pktTimer->stop();
+    if (m_forceTimer)
+        m_forceTimer->stop();
     m_searchHits.clear();      // 文本已清空，搜索定位/计数一并复位
     m_searchIndex = -1;
     updateSearchCountLabel();
@@ -3224,6 +3271,8 @@ void SerialTool::saveParams(bool silent) {
     o[QStringLiteral("flow")] = m_flow;
     o[QStringLiteral("read_timeout_ms")] = m_readTimeout;
     o[QStringLiteral("split_by_time")] = m_splitByTime;
+    o[QStringLiteral("split_force_by_time")] = m_forceByTime;
+    o[QStringLiteral("split_force_seconds")] = m_forceSeconds;
     o[QStringLiteral("split_by_char")] = m_splitByChar;
     o[QStringLiteral("split_pattern")] = m_splitPatternText;
     o[QStringLiteral("show_hex")] = m_chkShowHex->isChecked();
@@ -3304,8 +3353,12 @@ void SerialTool::loadParamsInner(bool silent) {
     m_parity = o.value(QStringLiteral("parity")).toString(QStringLiteral("None"));
     m_flow = o.value(QStringLiteral("flow")).toString(QStringLiteral("None"));
     m_readTimeout = o.value(QStringLiteral("read_timeout_ms")).toString(QStringLiteral("50"));
-    // 接收分包：默认只按空闲超时；两种可同时启用
+    // 接收分包：默认只按空闲超时；三种可任意组合
     m_splitByTime = o.value(QStringLiteral("split_by_time")).toBool(true);
+    m_forceByTime = o.value(QStringLiteral("split_force_by_time")).toBool(false);
+    m_forceSeconds = o.value(QStringLiteral("split_force_seconds")).toDouble(1.0);
+    if (!(m_forceSeconds > 0 && m_forceSeconds <= 3600))
+        m_forceSeconds = 1.0;
     m_splitByChar = o.value(QStringLiteral("split_by_char")).toBool(false);
     {
         QString err;
