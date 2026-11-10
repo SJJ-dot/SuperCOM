@@ -2744,6 +2744,7 @@ void SerialTool::showTabDropdown() {
     }
     pop->move(px, py);
     pop->show();
+    pop->armAfterShow();
 }
 
 void SerialTool::setActiveMsGroup(int g) {

@@ -28,6 +28,10 @@ public:
 
     std::function<void(int)> onPick;
 
+    // show() 之后调用：短时忽略行点击。触发弹层打开的那次鼠标 press 的 release
+    // 可能落进列表行（弹层刚出现就盖住落点），否则会立刻误选一项并关闭。
+    void armAfterShow();
+
 protected:
     void keyPressEvent(QKeyEvent* e) override;
 
@@ -40,6 +44,7 @@ private:
     QList<QLabel*> m_labels;
     QPointer<QScrollArea> m_scroll;
     int m_current = -1;
+    qint64 m_readyAtMs = 0;    // 允许响应行点击的时刻（armAfterShow 设置）
 
     QString m_textColor;
     QString m_accentColor;

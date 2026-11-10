@@ -1,9 +1,11 @@
 #include "combobox.h"
 
 #include <QDateTime>
+#include <QGuiApplication>
 #include <QHideEvent>
 #include <QPainter>
 #include <QPen>
+#include <QScreen>
 #include <QStyle>
 
 // 下拉框外观全部交给全局 QSS（themes.cpp），本类只做三件事：
@@ -106,6 +108,7 @@ void StyledComboBox::showPopup() {
     pop->move(popupTopLeft(pop->size()));
     setPopupOpen(true);
     pop->show();
+    pop->armAfterShow();
     pop->setFocus(Qt::PopupFocusReason);
 }
 
@@ -126,27 +129,34 @@ void StyledComboBox::hideEvent(QHideEvent* e) {
 
 QPoint StyledComboBox::popupTopLeft(const QSize& popupSize) const {
     const QRect box(mapToGlobal(QPoint(0, 0)), size());
-    const QWidget* top = window();
-    const QRect win = top ? top->frameGeometry() : box;   // 主窗口（或对话框）边界
-
     const int pad = ListPopup::kPad;
     const int gap = 4;
 
-    // 卡片左边缘与下拉框左边缘对齐（浮层左侧有 pad 宽透明留白）
-    int x = box.left() - pad;
-    int y = (box.bottom() + gap + popupSize.height() - pad <= win.bottom())
-                ? box.bottom() + gap - pad      // 向下展开
-                : box.top() - popupSize.height() + pad;   // 向上贴着下拉框顶边
+    // 弹层是顶层 Qt::Popup，允许超出父窗口（尤其「更多串口设置」这种小对话框）。
+    // 若按父窗口边界钳制，比对话框还高的列表会被压到对话框顶部，反过来盖住触发
+    // 它的下拉框：鼠标一松开就落进列表行、立即选中并关闭，表现为「点开就消失」。
+    // 因此一律按屏幕可用区域定位，并保证卡片不与下拉框重叠。
+    QRect avail;
+    if (QScreen* s = QGuiApplication::screenAt(box.center()))
+        avail = s->availableGeometry();
+    else if (QScreen* s2 = QGuiApplication::primaryScreen())
+        avail = s2->availableGeometry();
+    else
+        avail = QRect(box.center() - QPoint(400, 300), QSize(800, 600));
 
-    // 钳到主窗口内：留白可以略微溢出，卡片本体不越界
-    const QRect allow = win.adjusted(-pad, -pad, pad, pad);
-    if (x + popupSize.width() > allow.right() + 1)
-        x = allow.right() + 1 - popupSize.width();
-    if (x < allow.left())
-        x = allow.left();
-    if (y + popupSize.height() > allow.bottom() + 1)
-        y = allow.bottom() + 1 - popupSize.height();
-    if (y < allow.top())
-        y = allow.top();
+    const int need = popupSize.height() - pad;
+    const int below = avail.bottom() + 1 - box.bottom() - gap;
+    const int above = box.top() - avail.top() - gap;
+    // 卡片顶部贴下拉框底边 / 卡片底部贴下拉框顶边，两侧都不重叠
+    const bool down = (below >= need) || (above < need && below >= above);
+    int x = box.left() - pad;   // 卡片左边缘与下拉框左边缘对齐
+    int y = down ? (box.bottom() + gap - pad)
+                 : (box.top() - gap - popupSize.height() + pad);
+
+    // 只在屏幕范围内兜底；不按父窗口收缩
+    x = qBound(avail.left(), x,
+               qMax(avail.left(), avail.right() + 1 - popupSize.width()));
+    y = qBound(avail.top(), y,
+               qMax(avail.top(), avail.bottom() + 1 - popupSize.height()));
     return QPoint(x, y);
 }

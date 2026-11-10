@@ -1,5 +1,6 @@
 #include "listpopup.h"
 
+#include <QDateTime>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QKeyEvent>
@@ -90,6 +91,8 @@ ListPopup::ListPopup(const QStringList& items, int current, const sjj::ThemeColo
 
         maxTextW = qMax(maxTextW, lab->sizeHint().width());
         row->onClick = [this, i] {
+            if (QDateTime::currentMSecsSinceEpoch() < m_readyAtMs)
+                return;   // 触发打开的那一次点击的 release，不是用户选行
             m_current = i;
             if (onPick)
                 onPick(i);
@@ -132,6 +135,10 @@ ListPopup::ListPopup(const QStringList& items, int current, const sjj::ThemeColo
                 sc->ensureWidgetVisible(row, 0, 0);
         });
     }
+}
+
+void ListPopup::armAfterShow() {
+    m_readyAtMs = QDateTime::currentMSecsSinceEpoch() + 150;
 }
 
 void ListPopup::applyCurrent() {
