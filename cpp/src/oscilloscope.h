@@ -23,6 +23,7 @@ class QToolButton;
 class QPaintEvent;
 class QEvent;
 class QShowEvent;
+class QTimer;
 class TitleBar;
 class QJsonArray;
 class QJsonObject;
@@ -59,7 +60,8 @@ struct OscSeries {
     // 字节取值（pattern 写成 b2:3 这类写法时生效，1 基、含首尾）
     bool byteMode = false;
     OscByteSpec byte;
-    QVector<double> values;
+    QVector<double> values;      // 提取到的值（未乘倍率）
+    QVector<int> indices;        // 每个值对应的采样序号（分包序号），与 values 等长
 };
 
 // 当前视图范围：横轴窗口 + 纵轴范围（手动/自动）
@@ -92,11 +94,33 @@ protected:
     void contextMenuEvent(QContextMenuEvent* e) override;
 
 private:
-    int dataCount() const;                    // 各折线中最长的点数
+    int dataCount() const;                    // 现有采样序号跨度（末序号-首序号+1）
+    int dataFirst() const;                    // 现有数据的最小采样序号（无数据返回 0）
     int indexAtX(int x) const;                // 屏幕 x → 采样序号（按上次绘制的窗口）
     double valueAtY(int y) const;             // 屏幕 y → 数值（按上次绘制的纵轴）
 
+    // 一个像素列的包络：该序号区间内的首/末值与极值
+    struct ColAgg {
+        int firstIdx = 0;
+        int lastIdx = 0;
+        double firstV = 0, lastV = 0, minV = 0, maxV = 0;
+        int count = 0;
+    };
+    // 每条折线的包络缓存：左端锚定的等宽序号桶，末尾追加时可增量更新
+    struct SeriesEnvelope {
+        bool valid = false;
+        int i0 = 0;               // 缓存对应的窗口左端序号
+        int ppc = 1;              // 每列点数（桶宽）
+        int cols = 0;             // 绘图区像素列数
+        int firstIdxCached = -1;  // 缓存时该折线的首个序号（裁剪/清空检测）
+        int coveredUpTo = -1;     // 已聚合到的最大序号
+        QVector<ColAgg> buckets;
+    };
+    const QVector<ColAgg>& ensureEnvelope(int seriesIdx, const OscSeries& s,
+                                          int i0, int i1, int cols);
+
     const QVector<OscSeries>* m_series = nullptr;
+    QVector<SeriesEnvelope> m_env;           // 与 m_series 一一对应的包络缓存
     sjj::ThemeColors m_tc;
     WaveView m_view;
 
@@ -135,6 +159,7 @@ private slots:
 private:
     void buildConfigDialog();                  // 懒创建配置弹窗（非模态）
     void updateCfgButton();                    // 主界面入口按钮的「启用/总数」文字
+    void scheduleChartUpdate();                // 刷新节流（约 30fps）
     bool eventFilter(QObject* watched, QEvent* e) override;   // 未激活窗口时首次单击即进入编辑 + 边缘缩放
     void showEvent(QShowEvent* e) override;    // DWM 阴影 + Win11 圆角
     void paintEvent(QPaintEvent* e) override;  // 无边框窗口背景（主题 win_bg）
@@ -171,5 +196,10 @@ private:
     QPoint m_resizeStartPos;
     QRect m_resizeStartGeo;
 
-    static constexpr int kMaxPoints = 2000;   // 每条折线保留的点数上限
+    // 每条折线保留的点数上限；超出后按 kTrimBatch 批量丢弃最旧的点，
+    // 避免每次追加都做 O(n) 整体搬移（10 万点时尤其重要）
+    static constexpr int kMaxPoints = 100000;  // 每条折线保留的点数上限
+    static constexpr int kTrimBatch = 10000;   // 批量裁剪粒度
+    int m_sampleSeq = 0;                      // 下一个分包序号（所有折线共用，用于横轴对齐）
+    QTimer* m_paintTimer = nullptr;           // 刷新节流：高频数据下最多约 30fps 重绘
 };

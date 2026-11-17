@@ -24,6 +24,7 @@
 #include <QPainter>
 #include <QPalette>
 #include <QPen>
+#include <QPolygonF>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QShowEvent>
@@ -72,7 +73,12 @@ bool parseScaleText(const QString& text, double& out) {
 QString formatValue(double v) {
     if (!std::isfinite(v))
         return QStringLiteral("-");
-    if (std::abs(v) >= 10000 || (v != 0 && std::abs(v) < 0.01))
+    const double a = std::abs(v);
+    if (a >= 1e6)
+        return QString::number(v, 'e', 2);      // 百万以上用科学计数，避免过长
+    if (a >= 10000)
+        return QString::number(v, 'f', 0);      // 1 万~99 万取整，比 e 表示更短更好读
+    if (a != 0 && a < 0.01)
         return QString::number(v, 'e', 2);
     return QString::number(v, 'f', 2);
 }
@@ -366,26 +372,48 @@ void WaveChart::paintEvent(QPaintEvent*) {
     }
 
     // 横轴窗口：xSpan=显示点数（0=全部），xRight=窗口右端（-1=跟随最新）
+    // 横轴是「分包序号」，所有折线共用，晚加入的折线不会从 0 重新开始
     const int total = dataCount();
     if (total <= 0) {
         p.setPen(secondary);
         p.drawText(area, Qt::AlignCenter, QStringLiteral("等待数据…"));
         return;
     }
-    int i1 = (m_view.xRight < 0) ? total - 1 : qBound(0, m_view.xRight, total - 1);
+    const int firstIdx = dataFirst();
+    const int lastIdx = firstIdx + total - 1;
+    int i1 = (m_view.xRight < 0) ? lastIdx : qBound(firstIdx, m_view.xRight, lastIdx);
     int span = (m_view.xSpan <= 0 || total < 2) ? total : qBound(2, m_view.xSpan, total);
-    int i0 = qMax(0, i1 - span + 1);
-    i1 = qMin(total - 1, i0 + span - 1);
+    int i0 = qMax(firstIdx, i1 - span + 1);
+    i1 = qMin(lastIdx, i0 + span - 1);
 
     // 纵轴范围：自动取窗口内的数据范围，或用手动设置的 min/max
+    // 点数远多于像素列时走包络缓存（数据只在末尾追加时不重算历史列）
+    const int cols = qMax(1, int(area.width()));
+    if (m_env.size() != m_series->size())
+        m_env.resize(m_series->size());
+    struct VisRange {
+        int k0 = 0;
+        int k1 = -1;
+        bool dense = false;
+    };
+    QVector<VisRange> vis(m_series->size());
     double minY = 0, maxY = 0;
     bool any = false;
-    for (const OscSeries& s : *m_series) {
+    for (int si = 0; si < m_series->size(); ++si) {
+        const OscSeries& s = m_series->at(si);
         if (!s.enabled || s.values.isEmpty())
             continue;
-        const int j1 = qMin(i1, int(s.values.size()) - 1);
-        for (int i = i0; i <= j1; ++i) {
-            const double sv = s.values.at(i) * s.scale;
+        const auto begin = s.indices.cbegin();
+        const auto end = s.indices.cend();
+        const int k0 = int(std::lower_bound(begin, end, i0) - begin);
+        const int k1 = int(std::upper_bound(begin, end, i1) - begin) - 1;
+        if (k1 < k0)
+            continue;
+        vis[si].k0 = k0;
+        vis[si].k1 = k1;
+        vis[si].dense = (k1 - k0 + 1) > cols * 3;
+        auto accumulate = [&](double raw) {
+            const double sv = raw * s.scale;
             if (!any) {
                 minY = maxY = sv;
                 any = true;
@@ -393,6 +421,17 @@ void WaveChart::paintEvent(QPaintEvent*) {
                 minY = qMin(minY, sv);
                 maxY = qMax(maxY, sv);
             }
+        };
+        if (vis[si].dense) {
+            for (const ColAgg& b : ensureEnvelope(si, s, i0, i1, cols)) {
+                if (b.count <= 0)
+                    continue;
+                accumulate(b.minV);
+                accumulate(b.maxV);
+            }
+        } else {
+            for (int k = k0; k <= k1; ++k)
+                accumulate(s.values.at(k));
         }
     }
     if (!any) {
@@ -448,29 +487,73 @@ void WaveChart::paintEvent(QPaintEvent*) {
         if (xSpan == 0 && i > 0)
             continue; // 只有一个点时右侧不再重复画刻度
         p.setPen(secondary);
-        p.drawText(QRect(x - 28, area.bottom() + 3, 56, 18), Qt::AlignCenter,
+        // 序号可能到 6 位数：文本框贴边时向内收，避免被裁掉
+        QRect labelBox(x - 28, area.bottom() + 3, 56, 18);
+        if (labelBox.right() > width() - 2)
+            labelBox.moveRight(width() - 2);
+        if (labelBox.left() < 2)
+            labelBox.moveLeft(2);
+        p.drawText(labelBox, Qt::AlignCenter,
                    QString::number(qlonglong(i0) + qlonglong(xSpan) * i / xSteps));
     }
 
-    // 折线（只画窗口内的点）
+    // 折线（只画窗口内的点，横坐标用各自的采样序号，多条线天然对齐）
     int ci = 0;
-    for (const OscSeries& s : *m_series) {
-        if (!s.enabled || s.values.isEmpty()) {
+    for (int si = 0; si < m_series->size(); ++si) {
+        const OscSeries& s = m_series->at(si);
+        if (!s.enabled || s.values.isEmpty() || vis.at(si).k1 < 0) {
             ++ci;
             continue;
         }
-        const int j0 = qMax(0, i0);
-        const int j1 = qMin(i1, int(s.values.size()) - 1);
+        // 1px 平头/斜接：宽 1.6 + Round 会走 stroker 并为每个拐点生成圆弧子路径，
+        // 抗锯齿下 2000 点折线单帧要 1.4 秒；改成 1.0 + Flat/Miter 后只要几毫秒
         QPen line(seriesColors().at(ci % seriesColors().size()));
-        line.setWidthF(1.6);
-        line.setCapStyle(Qt::RoundCap);
-        line.setJoinStyle(Qt::RoundJoin);
+        line.setWidthF(1.0);
+        line.setCapStyle(Qt::FlatCap);
+        line.setJoinStyle(Qt::MiterJoin);
         p.setPen(line);
-        for (int i = j0 + 1; i <= j1; ++i)
-            p.drawLine(QPointF(toX(i - 1), toY(s.values.at(i - 1) * s.scale)),
-                       QPointF(toX(i), toY(s.values.at(i) * s.scale)));
-        if (j1 == j0)
-            p.drawEllipse(QPointF(toX(j0), toY(s.values.at(j0) * s.scale)), 2.5, 2.5);
+        if (vis.at(si).dense) {
+            // 点远多于像素列：每列画一条竖直包络线（drawLines 批量绘制最快）
+            QVector<QLineF> segs;
+            const auto& buckets = ensureEnvelope(si, s, i0, i1, cols);
+            segs.reserve(buckets.size());
+            for (const ColAgg& b : buckets) {
+                if (b.count <= 0)
+                    continue;
+                const qreal x = toX(b.firstIdx);
+                qreal yTop = toY(b.maxV * s.scale);
+                qreal yBot = toY(b.minV * s.scale);
+                if (yBot - yTop < 1.0) {   // 单点或平坦段：画 1px 短竖线
+                    const qreal mid = (yTop + yBot) * 0.5;
+                    yTop = mid - 0.5;
+                    yBot = mid + 0.5;
+                }
+                segs.append(QLineF(x, yTop, x, yBot));
+            }
+            if (!segs.isEmpty())
+                p.drawLines(segs);
+        } else {
+            const int k0 = vis.at(si).k0;
+            const int k1 = vis.at(si).k1;
+            // 逐段收集后用 drawLines 批量画：drawPolyline 在这个绘制设备上会退化成
+            // 极慢的路径描边（2000 点单帧约 1.7 秒），同样点位 drawLines 只要约 7 毫秒
+            QVector<QLineF> segs;
+            segs.reserve(qMax(0, k1 - k0));
+            QPointF prev(toX(s.indices.at(k0)), toY(s.values.at(k0) * s.scale));
+            for (int k = k0 + 1; k <= k1; ++k) {
+                const QPointF cur(toX(s.indices.at(k)), toY(s.values.at(k) * s.scale));
+                segs.append(QLineF(prev, cur));
+                prev = cur;
+            }
+            // 点数不多时开抗锯齿：线是斜的，不开会有明显台阶（密集绘制不开，省 CPU）
+            p.save();
+            p.setRenderHint(QPainter::Antialiasing, true);
+            if (!segs.isEmpty())
+                p.drawLines(segs);
+            else
+                p.drawEllipse(prev, 2.5, 2.5);   // 只有一个点：画实心圆标记
+            p.restore();
+        }
         ++ci;
     }
 
@@ -488,15 +571,83 @@ void WaveChart::paintEvent(QPaintEvent*) {
     }
 }
 
+// 采样序号跨度：所有折线共用同一套序号，晚加入的折线从加入时的序号开始
 int WaveChart::dataCount() const {
-    int n = 0;
     if (!m_series)
         return 0;
+    int first = -1, last = -1;
     for (const OscSeries& s : *m_series) {
-        if (s.enabled)
-            n = qMax(n, int(s.values.size()));
+        if (!s.enabled || s.indices.isEmpty())
+            continue;
+        const int a = s.indices.first();
+        const int b = s.indices.last();
+        first = (first < 0) ? a : qMin(first, a);
+        last = qMax(last, b);
     }
-    return n;
+    return first < 0 ? 0 : last - first + 1;
+}
+
+int WaveChart::dataFirst() const {
+    if (!m_series)
+        return 0;
+    int first = -1;
+    for (const OscSeries& s : *m_series) {
+        if (!s.enabled || s.indices.isEmpty())
+            continue;
+        const int a = s.indices.first();
+        first = (first < 0) ? a : qMin(first, a);
+    }
+    return qMax(0, first);
+}
+
+// 包络缓存：以窗口左端 i0 为锚、每列 ppc 个序号分桶。
+// 数据只在末尾追加（i1 变大）时只处理新增的点，历史列直接复用；
+// 窗口左端/列数/桶宽/数据首序号变化（缩放、裁剪、清空）时全量重建。
+const QVector<WaveChart::ColAgg>& WaveChart::ensureEnvelope(int seriesIdx,
+                                                           const OscSeries& s,
+                                                           int i0, int i1, int cols) {
+    if (seriesIdx >= m_env.size())
+        m_env.resize(seriesIdx + 1);
+    SeriesEnvelope& e = m_env[seriesIdx];
+    const int ppc = qMax(1, int(std::ceil(double(i1 - i0 + 1) / qMax(1, cols))));
+    const int firstIdx = s.indices.isEmpty() ? -1 : s.indices.first();
+    if (!e.valid || e.i0 != i0 || e.ppc != ppc || e.cols != cols
+        || e.firstIdxCached != firstIdx || i1 < e.coveredUpTo
+        || e.coveredUpTo < i0 - 1) {
+        e.valid = true;
+        e.i0 = i0;
+        e.ppc = ppc;
+        e.cols = cols;
+        e.firstIdxCached = firstIdx;
+        e.coveredUpTo = i0 - 1;
+        e.buckets.clear();
+    }
+    // 只聚合「上次之后」的新点
+    int k = int(std::upper_bound(s.indices.cbegin(), s.indices.cend(), e.coveredUpTo)
+                - s.indices.cbegin());
+    for (; k < s.indices.size(); ++k) {
+        const int idx = s.indices.at(k);
+        if (idx > i1)
+            break;
+        const int b = (idx - i0) / e.ppc;
+        while (e.buckets.size() <= b)
+            e.buckets.append(ColAgg());
+        ColAgg& c = e.buckets[b];
+        const double v = s.values.at(k);
+        if (c.count == 0) {
+            c.firstIdx = c.lastIdx = idx;
+            c.firstV = c.lastV = c.minV = c.maxV = v;
+            c.count = 1;
+        } else {
+            c.lastIdx = idx;
+            c.lastV = v;
+            c.minV = qMin(c.minV, v);
+            c.maxV = qMax(c.maxV, v);
+            ++c.count;
+        }
+        e.coveredUpTo = idx;
+    }
+    return e.buckets;
 }
 
 int WaveChart::indexAtX(int x) const {
@@ -1229,10 +1380,17 @@ void Oscilloscope::feed(const QString& text, const QByteArray& raw) {
     while (line.endsWith(QLatin1Char('\n')) || line.endsWith(QLatin1Char('\r')))
         line.chop(1);
     bool changed = false;
+    // 所有折线共用同一个采样序号（分包序号），晚加入的折线从当前序号开始画
+    const int seq = m_sampleSeq++;
     auto appendValue = [&](OscSeries& s, double v) {
         s.values.append(v);   // 只存原始值，倍率在绘制时换算
-        if (s.values.size() > kMaxPoints)
-            s.values.remove(0, s.values.size() - kMaxPoints);
+        s.indices.append(seq);
+        // 攒到 kMaxPoints + kTrimBatch 再一次性裁掉，均摊每次追加 O(1)
+        if (s.values.size() > kMaxPoints + kTrimBatch) {
+            const int drop = s.values.size() - kMaxPoints;
+            s.values.remove(0, drop);
+            s.indices.remove(0, drop);
+        }
         changed = true;
     };
     for (OscSeries& s : m_series) {
@@ -1266,12 +1424,30 @@ void Oscilloscope::feed(const QString& text, const QByteArray& raw) {
         appendValue(s, v);
     }
     if (changed)
-        m_chart->update();
+        scheduleChartUpdate();
+}
+
+// 高频数据下 update() 会过于频繁：合并成约 30fps 重绘，避免卡顿
+void Oscilloscope::scheduleChartUpdate() {
+    if (!m_paintTimer) {
+        m_paintTimer = new QTimer(this);
+        m_paintTimer->setSingleShot(true);
+        m_paintTimer->setInterval(30);
+        connect(m_paintTimer, &QTimer::timeout, this, [this] {
+            if (m_chart)
+                m_chart->update();
+        });
+    }
+    if (!m_paintTimer->isActive())
+        m_paintTimer->start();
 }
 
 void Oscilloscope::clearData() {
-    for (OscSeries& s : m_series)
+    for (OscSeries& s : m_series) {
         s.values.clear();
+        s.indices.clear();
+    }
+    m_sampleSeq = 0;   // 横轴从 0 重新开始
     m_chart->update();
 }
 
