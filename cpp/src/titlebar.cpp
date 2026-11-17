@@ -7,12 +7,13 @@
 
 #include "utils.h"
 
-TitleBar::TitleBar(QWidget* window) : QWidget(window), m_win(window) {
+TitleBar::TitleBar(QWidget* window, bool appBar) : QWidget(window), m_win(window), m_appBar(appBar) {
     // QWidget 子类必须设置 WA_StyledBackground，QSS 背景色才会绘制
     setAttribute(Qt::WA_StyledBackground, true);
     setFixedHeight(30);
     setObjectName(QStringLiteral("titleBar"));
     auto* h = new QHBoxLayout(this);
+    m_lay = h;
     h->setContentsMargins(8, 0, 2, 0);
     h->setSpacing(2);
 
@@ -26,13 +27,17 @@ TitleBar::TitleBar(QWidget* window) : QWidget(window), m_win(window) {
 
     // 标题 + 版本号（剥掉前导 v 再拼，避免 "vv1.0.3"）
     m_lblTitle = new QLabel(this);
-    QString ver = QString::fromUtf8(APP_VERSION);
-    while (ver.startsWith(QLatin1Char('v')) || ver.startsWith(QLatin1Char('V')))
-        ver.remove(0, 1);
-    m_lblTitle->setText(QStringLiteral("%1  v%2").arg(sjj::APP_TITLE, ver));
+    if (m_appBar) {
+        QString ver = QString::fromUtf8(APP_VERSION);
+        while (ver.startsWith(QLatin1Char('v')) || ver.startsWith(QLatin1Char('V')))
+            ver.remove(0, 1);
+        m_lblTitle->setText(QStringLiteral("%1  v%2").arg(sjj::APP_TITLE, ver));
+        m_lblTitle->setCursor(Qt::PointingHandCursor);
+        m_lblTitle->setToolTip(QStringLiteral("点击检查更新"));
+    } else {
+        m_lblTitle->setText(window->windowTitle());
+    }
     m_lblTitle->setStyleSheet(QStringLiteral("padding-left:4px;"));
-    m_lblTitle->setCursor(Qt::PointingHandCursor);
-    m_lblTitle->setToolTip(QStringLiteral("点击检查更新"));
     h->addWidget(m_lblTitle);
     h->addStretch(1);
 
@@ -61,10 +66,33 @@ TitleBar::TitleBar(QWidget* window) : QWidget(window), m_win(window) {
         b->setFixedSize(30, 30);
         h->addWidget(b);
     }
+    // 子窗口标题栏：不显示示波器/主题这两个主窗口专有按钮
+    if (!m_appBar) {
+        m_btnOsc->hide();
+        m_btnTheme->hide();
+    }
     // 窗口控制按钮
     connect(m_btnMin, &QToolButton::clicked, m_win, &QWidget::showMinimized);
     connect(m_btnMax, &QToolButton::clicked, this, &TitleBar::toggleMax);
     connect(m_btnClose, &QToolButton::clicked, m_win, &QWidget::close);
+}
+
+void TitleBar::setTitleText(const QString& text) {
+    if (m_lblTitle)
+        m_lblTitle->setText(text);
+}
+
+QToolButton* TitleBar::insertBeforeControls(const QString& text, const QString& tip) {
+    auto* btn = new QToolButton(this);
+    btn->setText(text);
+    btn->setToolTip(tip);
+    btn->setFixedSize(30, 30);
+    const int idx = m_lay ? m_lay->indexOf(m_btnMin) : -1;
+    if (m_lay && idx >= 0)
+        m_lay->insertWidget(idx, btn);
+    else if (m_lay)
+        m_lay->addWidget(btn);
+    return btn;
 }
 
 void TitleBar::applyTheme(const sjj::ThemeColors& t, const QString& themeName) {
@@ -96,7 +124,7 @@ void TitleBar::mousePressEvent(QMouseEvent* e) {
     if (e->button() == Qt::LeftButton) {
         QWidget* child = childAt(e->position().toPoint());
         // 版本号/图标区域不启动拖动（点击版本号用于检查更新）
-        if (child == m_lblTitle || child == m_lblIcon) {
+        if (m_appBar && (child == m_lblTitle || child == m_lblIcon)) {
             QWidget::mousePressEvent(e);
             return;
         }
@@ -131,8 +159,8 @@ void TitleBar::mouseMoveEvent(QMouseEvent* e) {
 
 void TitleBar::mouseReleaseEvent(QMouseEvent* e) {
     if (e->button() == Qt::LeftButton) {
-        // 版本号区域点击且本次未拖动 → 手动检查更新
-        if (!m_pressed && m_lblTitle->geometry().contains(e->position().toPoint())) {
+        // 版本号区域点击且本次未拖动 → 手动检查更新（仅主窗口标题栏）
+        if (m_appBar && !m_pressed && m_lblTitle->geometry().contains(e->position().toPoint())) {
             emit versionClicked();
             e->accept();
             return;

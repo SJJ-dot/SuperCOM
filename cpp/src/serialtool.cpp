@@ -358,11 +358,11 @@ void SerialTool::showEvent(QShowEvent* e) {
             arr.append(mk(QStringLiteral("xpp=(\\d+)"), QStringLiteral("1"), false));
             m_oscillo->fromJson(arr);
             m_oscillo->clearData();
-            m_oscillo->feed(QStringLiteral(
-                "xpp=1274 xpp=9999 fs=488\n"
-                "no numbers here\n"
-                "xpp=1300 fs=500\r\n"
-                "fs=600\n"));
+            // 一次 feed = 一个分包：四个分包分别喂入
+            m_oscillo->feed(QStringLiteral("xpp=1274 xpp=9999 fs=488"));
+            m_oscillo->feed(QStringLiteral("no numbers here"));
+            m_oscillo->feed(QStringLiteral("xpp=1300 fs=500\r\n"));
+            m_oscillo->feed(QStringLiteral("fs=600"));
             QString log;
             for (int i = 0; i < 4; ++i) {
                 QStringList vs;
@@ -1838,7 +1838,7 @@ void SerialTool::appendToView(QVector<Record>& recs) {
     if (m_oscillo) {
         for (const Record& r : recs) {
             if (r.kind == QStringLiteral("rx"))
-                m_oscillo->feed(decodeBytesByCurrent(r.rawBytes));
+                m_oscillo->feed(decodeBytesByCurrent(r.rawBytes), r.rawBytes);
         }
     }
     // 暂停语义 = 不自动滚动：数据照常写入视图，滚动位置锁定不动。
@@ -3371,6 +3371,7 @@ void SerialTool::saveParams(bool silent) {
     o[QStringLiteral("interval_ms")] = m_entryInterval->text();
     o[QStringLiteral("show_ts")] = m_chkShowTs->isChecked();
     o[QStringLiteral("oscillo")] = m_oscillo ? m_oscillo->toJson() : QJsonArray();
+    o[QStringLiteral("osc_view")] = m_oscillo ? m_oscillo->viewToJson() : QJsonObject();
     o[QStringLiteral("ms_groups")] = msGroupsToData();
     o[QStringLiteral("send_history")] = QJsonArray::fromStringList(m_sendHistory);
     // 搜索历史：带时间戳，按时间倒序
@@ -3466,9 +3467,11 @@ void SerialTool::loadParamsInner(bool silent) {
     m_chkAddCrlf->setChecked(o.value(QStringLiteral("add_crlf")).toBool(false));
     m_entryInterval->setText(o.value(QStringLiteral("interval_ms")).toString(QStringLiteral("1000")));
     m_chkShowTs->setChecked(o.value(QStringLiteral("show_ts")).toBool(true));
-    // 示波器表达式（自动保存，切换主题/重启后保留）
-    if (m_oscillo)
+    // 示波器表达式与显示范围（自动保存，切换主题/重启后保留）
+    if (m_oscillo) {
         m_oscillo->fromJson(o.value(QStringLiteral("oscillo")).toArray());
+        m_oscillo->viewFromJson(o.value(QStringLiteral("osc_view")).toObject());
+    }
     // 端口匹配
     const QString target = o.value(QStringLiteral("port")).toString();
     for (auto it = m_portMap.cbegin(); it != m_portMap.cend(); ++it) {

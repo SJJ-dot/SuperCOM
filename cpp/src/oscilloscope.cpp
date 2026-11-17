@@ -1,5 +1,6 @@
 #include "oscilloscope.h"
 
+#include <QAbstractButton>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QColor>
@@ -15,18 +16,35 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLayoutItem>
+#include <QContextMenuEvent>
 #include <QLineEdit>
+#include <QMenu>
+#include <QMessageBox>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPalette>
 #include <QPen>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QShowEvent>
 #include <QStringList>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 
 #include <algorithm>
 #include <cmath>
+
+#ifdef Q_OS_WIN
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <dwmapi.h>
+#endif
+
+#include "titlebar.h"
 
 namespace {
 
@@ -87,6 +105,75 @@ const QRegularExpression& numberRe() {
     static const QRegularExpression re(
         QStringLiteral("[-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][-+]?\\d+)?"));
     return re;
+}
+
+// 字节取值写法：b2 / b2:3 / b2:3le / i2:3（b=无符号 i=有符号，le=小端，默认大端）
+// 「第 N 字节」从 1 开始计数，区间含首尾。
+bool parseByteSpec(const QString& text, bool& sign, int& from, int& to,
+                   bool& bigEndian) {
+    QString t = text.trimmed();
+    if (t.size() < 2)
+        return false;
+    const QChar head = t.at(0).toLower();
+    if (head != QLatin1Char('b') && head != QLatin1Char('i'))
+        return false;
+    sign = (head == QLatin1Char('i'));
+    t.remove(0, 1);
+    const QString lt = t.toLower();
+    if (lt.endsWith(QLatin1String("le"))) {
+        bigEndian = false;
+        t.chop(2);
+    } else if (lt.endsWith(QLatin1String("be"))) {
+        bigEndian = true;
+        t.chop(2);
+    } else {
+        bigEndian = true;
+    }
+    const QStringList parts = t.split(QLatin1Char(':'));
+    if (parts.isEmpty() || parts.size() > 2)
+        return false;
+    bool okA = false;
+    from = parts.at(0).toInt(&okA);
+    if (!okA)
+        return false;
+    if (parts.size() == 2) {
+        bool okB = false;
+        to = parts.at(1).toInt(&okB);
+        if (!okB)
+            return false;
+    } else {
+        to = from;
+    }
+    // 只接受 1~4 字节整数（double 可精确表示）
+    if (from < 1 || to < from || (to - from + 1) > 4)
+        return false;
+    return true;
+}
+
+// 按区间从原始字节取整数；帧长度不足时返回 false
+bool byteValueOf(const QByteArray& raw, int from, int to, bool bigEndian,
+                 bool sign, double& out) {
+    const int n = to - from + 1;
+    if (raw.size() < to)
+        return false;
+    quint64 v = 0;
+    if (bigEndian) {
+        for (int i = 0; i < n; ++i)
+            v = (v << 8) | quint8(raw.at(from - 1 + i));
+    } else {
+        for (int i = n - 1; i >= 0; --i)
+            v = (v << 8) | quint8(raw.at(from - 1 + i));
+    }
+    if (sign) {
+        const int bits = n * 8;
+        const quint64 signBit = quint64(1) << (bits - 1);
+        if (v & signBit)
+            v |= (~quint64(0)) << bits;
+        out = double(qint64(v));
+    } else {
+        out = double(v);
+    }
+    return true;
 }
 
 } // namespace
@@ -154,6 +241,9 @@ void WaveChart::paintEvent(QPaintEvent*) {
     const int legendH = legendLines > 0 ? legendLines * 18 + 2 : 0;
 
     const QRect area = rect().adjusted(58, 10 + legendH, -12, -26);
+    m_plot = area;
+    m_i0 = 0;
+    m_i1 = -1;
     if (area.width() < 40 || area.height() < 30 || !m_series)
         return;
 
@@ -180,15 +270,27 @@ void WaveChart::paintEvent(QPaintEvent*) {
         }
     }
 
-    // 存储的是原始提取值，倍率只在绘制/图例时换算（改倍率不影响历史数据）
+    // 横轴窗口：xSpan=显示点数（0=全部），xRight=窗口右端（-1=跟随最新）
+    const int total = dataCount();
+    if (total <= 0) {
+        p.setPen(secondary);
+        p.drawText(area, Qt::AlignCenter, QStringLiteral("等待数据…"));
+        return;
+    }
+    int i1 = (m_view.xRight < 0) ? total - 1 : qBound(0, m_view.xRight, total - 1);
+    int span = (m_view.xSpan <= 0 || total < 2) ? total : qBound(2, m_view.xSpan, total);
+    int i0 = qMax(0, i1 - span + 1);
+    i1 = qMin(total - 1, i0 + span - 1);
+
+    // 纵轴范围：自动取窗口内的数据范围，或用手动设置的 min/max
     double minY = 0, maxY = 0;
-    int maxLen = 1;
     bool any = false;
     for (const OscSeries& s : *m_series) {
         if (!s.enabled || s.values.isEmpty())
             continue;
-        for (const double v : s.values) {
-            const double sv = v * s.scale;
+        const int j1 = qMin(i1, int(s.values.size()) - 1);
+        for (int i = i0; i <= j1; ++i) {
+            const double sv = s.values.at(i) * s.scale;
             if (!any) {
                 minY = maxY = sv;
                 any = true;
@@ -197,26 +299,36 @@ void WaveChart::paintEvent(QPaintEvent*) {
                 maxY = qMax(maxY, sv);
             }
         }
-        maxLen = qMax(maxLen, s.values.size());
     }
     if (!any) {
         p.setPen(secondary);
-        p.drawText(area, Qt::AlignCenter, QStringLiteral("等待数据…"));
+        p.drawText(area, Qt::AlignCenter, QStringLiteral("该范围暂无数据…"));
         return;
     }
-    if (qFuzzyCompare(minY, maxY)) {
-        minY -= 1;
-        maxY += 1;
+    const bool manualY = !m_view.yAuto && m_view.yMax > m_view.yMin;
+    if (manualY) {
+        minY = m_view.yMin;
+        maxY = m_view.yMax;
+    } else {
+        if (qFuzzyCompare(minY, maxY)) {
+            minY -= 1;
+            maxY += 1;
+        }
+        const double padY = (maxY - minY) * 0.08;
+        minY -= padY;
+        maxY += padY;
     }
-    const double padY = (maxY - minY) * 0.08;
-    minY -= padY;
-    maxY += padY;
+    m_i0 = i0;
+    m_i1 = i1;
+    m_y0 = minY;
+    m_y1 = maxY;
 
     const auto toY = [&](double v) -> qreal {
         return area.bottom() - (v - minY) / (maxY - minY) * area.height();
     };
     const auto toX = [&](int i) -> qreal {
-        return area.left() + (maxLen <= 1 ? 0.0 : double(i) / (maxLen - 1) * area.width());
+        const int d = qMax(1, i1 - i0);
+        return area.left() + double(i - i0) / d * area.width();
     };
 
     // 网格 + 轴刻度
@@ -231,69 +343,291 @@ void WaveChart::paintEvent(QPaintEvent*) {
                    Qt::AlignRight | Qt::AlignVCenter,
                    formatValue(maxY - (maxY - minY) * i / 4));
     }
-    // X 轴横坐标是采样序号，范围 0..maxLen-1；段数随点数变化，点数少时刻度不会重复
-    const int lastIdx = qMax(0, maxLen - 1);
-    const int xSteps = qBound(1, lastIdx, 4);
+    // X 轴：标注窗口内的采样序号，段数随跨度变化，点数少时刻度不会重复
+    const int xSpan = qMax(0, i1 - i0);
+    const int xSteps = qBound(1, xSpan, 4);
     for (int i = 0; i <= xSteps; ++i) {
         const int x = area.left() + area.width() * i / xSteps;
         p.setPen(dash);
         p.drawLine(x, area.top(), x, area.bottom());
-        if (lastIdx == 0 && i > 0)
-            continue; // 只有一个数据点时右侧刻度不会再画一个 0
+        if (xSpan == 0 && i > 0)
+            continue; // 只有一个点时右侧不再重复画刻度
         p.setPen(secondary);
-        p.drawText(QRect(x - 24, area.bottom() + 3, 48, 18), Qt::AlignCenter,
-                   QString::number(qlonglong(lastIdx) * i / xSteps));
+        p.drawText(QRect(x - 28, area.bottom() + 3, 56, 18), Qt::AlignCenter,
+                   QString::number(qlonglong(i0) + qlonglong(xSpan) * i / xSteps));
     }
 
-    // 折线
+    // 折线（只画窗口内的点）
     int ci = 0;
     for (const OscSeries& s : *m_series) {
         if (!s.enabled || s.values.isEmpty()) {
             ++ci;
             continue;
         }
+        const int j0 = qMax(0, i0);
+        const int j1 = qMin(i1, int(s.values.size()) - 1);
         QPen line(seriesColors().at(ci % seriesColors().size()));
         line.setWidthF(1.6);
         line.setCapStyle(Qt::RoundCap);
         line.setJoinStyle(Qt::RoundJoin);
         p.setPen(line);
-        for (int i = 1; i < s.values.size(); ++i)
+        for (int i = j0 + 1; i <= j1; ++i)
             p.drawLine(QPointF(toX(i - 1), toY(s.values.at(i - 1) * s.scale)),
                        QPointF(toX(i), toY(s.values.at(i) * s.scale)));
-        if (s.values.size() == 1)
-            p.drawEllipse(QPointF(toX(0), toY(s.values.at(0) * s.scale)), 2.5, 2.5);
+        if (j1 == j0)
+            p.drawEllipse(QPointF(toX(j0), toY(s.values.at(j0) * s.scale)), 2.5, 2.5);
         ++ci;
     }
 
+    // 框选中的橡皮筋
+    if (m_selActive) {
+        const QRect sel = QRect(m_selFrom, m_selTo).normalized().intersected(area);
+        if (sel.isValid() && sel.width() > 1 && sel.height() > 1) {
+            QColor accent(m_tc.value(QStringLiteral("accent")));
+            accent.setAlpha(48);
+            p.fillRect(sel, accent);
+            QPen sp(QColor(m_tc.value(QStringLiteral("accent"))), 1, Qt::DashLine);
+            p.setPen(sp);
+            p.drawRect(sel);
+        }
+    }
+}
+
+int WaveChart::dataCount() const {
+    int n = 0;
+    if (!m_series)
+        return 0;
+    for (const OscSeries& s : *m_series) {
+        if (s.enabled)
+            n = qMax(n, int(s.values.size()));
+    }
+    return n;
+}
+
+int WaveChart::indexAtX(int x) const {
+    if (m_i1 < m_i0 || m_plot.width() <= 0)
+        return m_i0;
+    double fx = double(x - m_plot.left()) / m_plot.width();
+    fx = qBound(0.0, fx, 1.0);
+    return m_i0 + int(qRound(fx * (m_i1 - m_i0)));
+}
+
+double WaveChart::valueAtY(int y) const {
+    if (m_plot.height() <= 0)
+        return m_y0;
+    double fy = double(m_plot.bottom() - y) / m_plot.height();
+    fy = qBound(0.0, fy, 1.0);
+    return m_y0 + fy * (m_y1 - m_y0);
+}
+
+void WaveChart::setView(const WaveView& v) {
+    m_view = v;
+    update();
+}
+
+void WaveChart::resetView() {
+    m_view = WaveView();
+    update();
+}
+
+void WaveChart::wheelEvent(QWheelEvent* e) {
+    const int delta = e->angleDelta().y();
+    const QPoint pos = e->position().toPoint();
+    if (delta == 0 || m_i1 < m_i0 || !m_plot.contains(pos)) {
+        QWidget::wheelEvent(e);
+        return;
+    }
+    const double factor = delta > 0 ? 0.8 : 1.25;   // 上滚放大
+    if (e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier)) {
+        // 纵轴缩放：以鼠标处的数值为锚点
+        const double at = valueAtY(pos.y());
+        const double lo = m_y0, hi = m_y1;
+        const double n0 = at - (at - lo) * factor;
+        const double n1 = at + (hi - at) * factor;
+        if (n1 - n0 > 1e-12) {
+            m_view.yAuto = false;
+            m_view.yMin = n0;
+            m_view.yMax = n1;
+        }
+    } else {
+        // 横轴缩放：跟随最新时只改窗口宽度；窗口已固定时以鼠标处的序号为锚点伸缩
+        const int total = qMax(2, dataCount());
+        const int curSpan = m_i1 - m_i0 + 1;
+        const int newSpan = qBound(2, int(qRound(curSpan * factor)), total);
+        if (newSpan >= total) {
+            m_view.xSpan = 0;                 // 拉到最大＝全部数据
+        } else if (m_view.xRight < 0) {
+            m_view.xSpan = newSpan;           // 仍跟随最新
+        } else {
+            const double fx = qBound(0.0, double(pos.x() - m_plot.left()) / m_plot.width(), 1.0);
+            const int anchor = indexAtX(pos.x());
+            int newI0 = anchor - int(qRound(fx * (newSpan - 1)));
+            int newI1 = newI0 + newSpan - 1;
+            if (newI1 > total - 1) {
+                newI1 = total - 1;
+                newI0 = newI1 - newSpan + 1;
+            }
+            if (newI0 < 0) {
+                newI0 = 0;
+                newI1 = newSpan - 1;
+            }
+            m_view.xSpan = newSpan;
+            m_view.xRight = newI1;
+        }
+    }
+    update();
+    e->accept();
+}
+
+void WaveChart::mousePressEvent(QMouseEvent* e) {
+    if (e->button() == Qt::LeftButton && m_i1 >= m_i0
+        && m_plot.contains(e->position().toPoint())) {
+        m_selActive = true;
+        m_selFrom = m_selTo = e->position().toPoint();
+        setCursor(Qt::CrossCursor);
+        update();
+        e->accept();
+        return;
+    }
+    QWidget::mousePressEvent(e);
+}
+
+void WaveChart::mouseMoveEvent(QMouseEvent* e) {
+    if (m_selActive) {
+        const QPoint p(e->position().toPoint().x(), e->position().toPoint().y());
+        m_selTo = QPoint(qBound(m_plot.left(), p.x(), m_plot.right()),
+                         qBound(m_plot.top(), p.y(), m_plot.bottom()));
+        update();
+        e->accept();
+        return;
+    }
+    QWidget::mouseMoveEvent(e);
+}
+
+void WaveChart::mouseReleaseEvent(QMouseEvent* e) {
+    if (e->button() == Qt::LeftButton && m_selActive) {
+        m_selActive = false;
+        unsetCursor();
+        const QPoint p(e->position().toPoint().x(), e->position().toPoint().y());
+        m_selTo = QPoint(qBound(m_plot.left(), p.x(), m_plot.right()),
+                         qBound(m_plot.top(), p.y(), m_plot.bottom()));
+        const QRect sel = QRect(m_selFrom, m_selTo).normalized();
+        if (sel.width() > 8 && sel.height() > 8) {
+            const int total = dataCount();
+            int a = indexAtX(sel.left());
+            int b = indexAtX(sel.right());
+            if (a > b)
+                std::swap(a, b);
+            const int span = qBound(2, b - a + 1, qMax(2, total));
+            m_view.xSpan = span;
+            m_view.xRight = b;
+            const double top = valueAtY(sel.top());
+            const double bot = valueAtY(sel.bottom());
+            if (qAbs(top - bot) > 1e-12) {
+                m_view.yAuto = false;
+                m_view.yMin = qMin(top, bot);
+                m_view.yMax = qMax(top, bot);
+            }
+            update();
+        } else {
+            update();
+        }
+        e->accept();
+        return;
+    }
+    QWidget::mouseReleaseEvent(e);
+}
+
+void WaveChart::mouseDoubleClickEvent(QMouseEvent* e) {
+    if (e->button() == Qt::LeftButton) {
+        resetView();   // 双击复位：全部数据 + 纵轴自动
+        e->accept();
+        return;
+    }
+    QWidget::mouseDoubleClickEvent(e);
+}
+
+void WaveChart::contextMenuEvent(QContextMenuEvent* e) {
+    QMenu menu(this);
+    QAction* actReset = menu.addAction(QStringLiteral("重置"));
+    menu.addSeparator();
+    QAction* actAutoY = menu.addAction(QStringLiteral("自动纵轴"));
+    actAutoY->setCheckable(true);
+    actAutoY->setChecked(m_view.yAuto);
+    QAction* actLatest = menu.addAction(QStringLiteral("最新数据"));
+    actLatest->setCheckable(true);
+    actLatest->setChecked(m_view.xRight < 0);
+
+    QAction* picked = menu.exec(e->globalPos());
+    if (!picked) {
+        e->accept();
+        return;
+    }
+    if (picked == actReset) {
+        // 横轴、纵轴一起复位：全部数据 + 自动纵轴
+        m_view = WaveView();
+    } else if (picked == actAutoY) {
+        if (actAutoY->isChecked()) {
+            m_view.yAuto = true;
+        } else {
+            // 取消自动：锁定当前显示的纵轴范围
+            m_view.yAuto = false;
+            m_view.yMin = m_y0;
+            m_view.yMax = m_y1;
+        }
+    } else if (picked == actLatest) {
+        if (actLatest->isChecked()) {
+            // 勾选：保持当前窗口点数，右端始终跟随最新数据
+            m_view.xRight = -1;
+        } else if (m_i1 >= m_i0) {
+            // 取消勾选：窗口停在当前显示的数据上，不再自动跟随
+            m_view.xSpan = qMax(0, m_i1 - m_i0 + 1);
+            m_view.xRight = m_i1;
+        }
+    }
+    update();
+    e->accept();
 }
 
 // ==================== Oscilloscope ====================
 
 Oscilloscope::Oscilloscope(QWidget* parent) : QWidget(parent) {
+    // 无边框 + 自绘标题栏：与主窗口一致，「?」放进标题栏（最小化左侧）
+    setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
+    setAttribute(Qt::WA_TranslucentBackground, true);
     setWindowTitle(QStringLiteral("示波器"));
     resize(760, 520);
     setMinimumSize(520, 340);
-    auto* root = new QVBoxLayout(this);
+
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(0);
+
+    m_titleBar = new TitleBar(this, false);
+    m_titleBar->setTitleText(windowTitle());
+    QToolButton* btnHelp = m_titleBar->insertBeforeControls(
+        QStringLiteral("?"), QStringLiteral("示波器操作提示"));
+    connect(btnHelp, &QToolButton::clicked, this, &Oscilloscope::showHelp);
+    outer->addWidget(m_titleBar);
+
+    auto* content = new QWidget(this);
+    outer->addWidget(content, 1);
+    auto* root = new QVBoxLayout(content);
     root->setContentsMargins(8, 8, 8, 8);
     root->setSpacing(6);
 
-    auto* hint = new QLabel(QStringLiteral(
-        "按正则从接收文本提取数字：一行取一个点，横轴为提取次数，纵轴为数值 × 倍率。"), this);
-    hint->setWordWrap(true);
-    root->addWidget(hint);
-
-    m_chart = new WaveChart(this);
+    m_chart = new WaveChart(content);
     m_chart->bindSeries(&m_series);
     root->addWidget(m_chart, 1);
 
     // 表达式配置收进弹窗：主界面只留一个入口，图表区域尽量大
     auto* bar = new QHBoxLayout;
-    m_btnCfg = new QPushButton(this);
+    m_btnCfg = new QPushButton(content);
     m_btnCfg->setToolTip(QStringLiteral("打开提取表达式配置（关闭后收起，改动立即生效）"));
     connect(m_btnCfg, &QPushButton::clicked, this, &Oscilloscope::openConfig);
     bar->addWidget(m_btnCfg);
     bar->addStretch(1);
-    auto* btnClear = new QPushButton(QStringLiteral("清空数据"), this);
+    auto* btnClear = new QPushButton(QStringLiteral("清空数据"), content);
     connect(btnClear, &QPushButton::clicked, this, &Oscilloscope::clearData);
     bar->addWidget(btnClear);
     root->addLayout(bar);
@@ -301,6 +635,133 @@ Oscilloscope::Oscilloscope(QWidget* parent) : QWidget(parent) {
     buildConfigDialog();
     m_series.append(OscSeries());
     rebuildRows();
+    installResizeSupport();
+}
+
+void Oscilloscope::showEvent(QShowEvent* e) {
+    QWidget::showEvent(e);
+#ifdef Q_OS_WIN
+    // 与主窗口一致：DWM 系统阴影 + Win11 圆角（无边框窗口自带）
+    const HWND hwnd = HWND(winId());
+    MARGINS margins = {-1, -1, -1, -1};
+    DwmExtendFrameIntoClientArea(hwnd, &margins);
+    const int pref = 2;   // DWMWCP_ROUND
+    DwmSetWindowAttribute(hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &pref, sizeof(pref));
+#endif
+    installResizeSupport();
+}
+
+void Oscilloscope::paintEvent(QPaintEvent*) {
+    // 无边框窗口：自己画不透明背景（主题 win_bg），圆角由系统裁剪
+    QColor bg(m_tc.value(QStringLiteral("win_bg")));
+    if (!bg.isValid())
+        bg = palette().window().color();
+    QPainter p(this);
+    p.fillRect(rect(), bg);
+}
+
+// 边缘缩放：鼠标跟踪 + 事件过滤（子控件不拦截窗口边缘的拖动）
+void Oscilloscope::installResizeSupport() {
+    setMouseTracking(true);
+    if (!property("resizeFilterInstalled").toBool()) {
+        installEventFilter(this);
+        setProperty("resizeFilterInstalled", true);
+    }
+    const auto children = findChildren<QWidget*>();
+    for (QWidget* w : children) {
+        if (w->window() != this || w->property("resizeFilterInstalled").toBool())
+            continue;
+        w->setMouseTracking(true);
+        w->installEventFilter(this);
+        w->setProperty("resizeFilterInstalled", true);
+    }
+}
+
+int Oscilloscope::detectResizeEdge(const QPoint& pos) const {
+    if (isMaximized())
+        return 0;
+    if (!rect().contains(pos))
+        return 0;
+    const int m = m_resizeMargin;
+    int edges = 0;
+    if (pos.x() <= m)
+        edges |= EdgeLeft;
+    if (pos.x() >= width() - m)
+        edges |= EdgeRight;
+    if (pos.y() <= m)
+        edges |= EdgeTop;
+    if (pos.y() >= height() - m)
+        edges |= EdgeBottom;
+    return edges;
+}
+
+Qt::CursorShape Oscilloscope::resizeCursor(int edges) {
+    if (edges == EdgeLeft || edges == EdgeRight)
+        return Qt::SizeHorCursor;
+    if (edges == EdgeTop || edges == EdgeBottom)
+        return Qt::SizeVerCursor;
+    if (edges == (EdgeLeft | EdgeTop) || edges == (EdgeRight | EdgeBottom))
+        return Qt::SizeFDiagCursor;
+    if (edges == (EdgeRight | EdgeTop) || edges == (EdgeLeft | EdgeBottom))
+        return Qt::SizeBDiagCursor;
+    return Qt::ArrowCursor;
+}
+
+void Oscilloscope::applyResize(const QPoint& gpos) {
+    const int edge = m_resizeEdge;
+    QRect geo = m_resizeStartGeo;
+    const int dx = gpos.x() - m_resizeStartPos.x();
+    const int dy = gpos.y() - m_resizeStartPos.y();
+    const int minW = minimumWidth(), minH = minimumHeight();
+    if (edge & EdgeLeft) {
+        const int newW = geo.width() - dx;
+        if (newW >= minW) {
+            geo.setX(geo.x() + dx);
+            geo.setWidth(newW);
+        } else {
+            geo.setX(geo.x() + geo.width() - minW);
+            geo.setWidth(minW);
+        }
+    }
+    if (edge & EdgeRight)
+        geo.setWidth(qMax(minW, geo.width() + dx));
+    if (edge & EdgeTop) {
+        const int newH = geo.height() - dy;
+        if (newH >= minH) {
+            geo.setY(geo.y() + dy);
+            geo.setHeight(newH);
+        } else {
+            geo.setY(geo.y() + geo.height() - minH);
+            geo.setHeight(minH);
+        }
+    }
+    if (edge & EdgeBottom)
+        geo.setHeight(qMax(minH, geo.height() + dy));
+    setGeometry(geo);
+}
+
+void Oscilloscope::showHelp() {
+    QMessageBox box(QMessageBox::Information, QStringLiteral("示波器操作提示"),
+                    QStringLiteral(
+                        "数据来源：接收区每产生一个分包（一条接收记录），就把该包文本作为一次匹配输入，"
+                        "每个正则运行一次、取首个匹配；分包由接收区的分包规则决定，与换行符无关。\n"
+                        "也可以按字节取值：同一个分包算一帧，如 b2:3 取第 2~3 字节（大端）。\n\n"
+                        "鼠标操作\n"
+                        "· 滚轮：缩放横轴（时间窗）\n"
+                        "· Shift / Ctrl + 滚轮：缩放纵轴\n"
+                        "· 左键拖拽：框选放大\n"
+                        "· 双击：恢复全部数据\n"
+                        "· 右键：重置 / 自动纵轴 / 最新数据\n\n"
+                        "提取表达式（每个表达式一条折线，倍率只影响显示）\n"
+                        "· 文本：正则如 xpp=(\\d+)，取该分包第一个匹配\n"
+                        "· 字节：b2:3 大端 / b2:3le 小端 / i2:3 有符号 / i2:3le 小端有符号"
+                        " / b5 单字节（第 1 字节起算）\n"
+                        "· 「清空数据」只清曲线，不改表达式配置"),
+                    QMessageBox::NoButton, this);
+    QAbstractButton* btnOk =
+        box.addButton(QStringLiteral("知道了"), QMessageBox::AcceptRole);
+    box.setEscapeButton(btnOk);   // Esc 也能关掉
+    box.exec();
 }
 
 // 表达式配置弹窗：非模态，关闭只是收起，不销毁，改动实时作用于 m_series
@@ -316,10 +777,11 @@ void Oscilloscope::buildConfigDialog() {
     lay->setSpacing(8);
 
     auto* head = new QHBoxLayout;
-    head->addWidget(new QLabel(QStringLiteral("一行一条折线；正则取数字，倍率只影响显示"), m_cfgDlg));
+    head->addWidget(new QLabel(QStringLiteral("文本按分包取数，也可按字节取值（b2:3）；倍率只影响显示"),
+                               m_cfgDlg));
     head->addStretch(1);
-    auto* btnHelp = new QPushButton(QStringLiteral("正则帮助"), m_cfgDlg);
-    btnHelp->setToolTip(QStringLiteral("正则写法说明与可直接复制的示例"));
+    auto* btnHelp = new QPushButton(QStringLiteral("写法帮助"), m_cfgDlg);
+    btnHelp->setToolTip(QStringLiteral("正则与字节取值写法说明、可直接复制的示例"));
     connect(btnHelp, &QPushButton::clicked, this, &Oscilloscope::showRegexHelp);
     head->addWidget(btnHelp);
     auto* btnAdd = new QPushButton(QStringLiteral("＋ 添加表达式"), m_cfgDlg);
@@ -389,8 +851,22 @@ void Oscilloscope::setThemeColors(const sjj::ThemeColors& t) {
 void Oscilloscope::applyPattern(int idx, const QString& text) {
     if (idx < 0 || idx >= m_series.size())
         return;
-    m_series[idx].pattern = text;
-    m_series[idx].regex = QRegularExpression(text);
+    OscSeries& s = m_series[idx];
+    s.pattern = text;
+    bool sign = false, bigEndian = true;
+    int from = 1, to = 1;
+    if (parseByteSpec(text, sign, from, to, bigEndian)) {
+        // 字节取值：不编译正则，按字节区间从原始帧里取
+        s.byteMode = true;
+        s.byteFrom = from;
+        s.byteTo = to;
+        s.byteBigEndian = bigEndian;
+        s.byteSigned = sign;
+        s.regex = QRegularExpression();
+    } else {
+        s.byteMode = false;
+        s.regex = QRegularExpression(text);
+    }
     m_chart->update();
 }
 
@@ -441,8 +917,10 @@ void Oscilloscope::rebuildRows() {
         lay->addWidget(r.check);
 
         r.pattern = new QLineEdit(m_series.at(i).pattern, r.widget);
-        r.pattern->setPlaceholderText(QStringLiteral("正则，如 xpp=(\\d+)"));
-        r.pattern->setToolTip(QStringLiteral("正则表达式，第一处匹配的数字为该行取值"));
+        r.pattern->setPlaceholderText(QStringLiteral("正则如 xpp=(\\d+)；字节如 b2:3"));
+        r.pattern->setToolTip(QStringLiteral(
+            "文本：正则，该分包第一处匹配的数字即为取值（每包每正则只取一个点）\n"
+            "字节：b2:3 取第 2~3 字节（大端无符号），b2:3le 小端，i2:3 有符号，b5 单字节"));
         r.pattern->installEventFilter(this);   // 窗口未激活时首次单击即可编辑
         connect(r.pattern, &QLineEdit::textChanged, this,
                 [this, i](const QString& t) { applyPattern(i, t); });
@@ -502,6 +980,54 @@ bool Oscilloscope::eventFilter(QObject* watched, QEvent* e) {
             w->setFocus(Qt::MouseFocusReason);
         }
     }
+
+    // 无边框窗口边缘缩放（仅本窗口内的事件）
+    const QEvent::Type t = e->type();
+    if (t == QEvent::MouseMove || t == QEvent::MouseButtonPress
+        || t == QEvent::MouseButtonRelease) {
+        auto* src = qobject_cast<QWidget*>(watched);
+        if (!src || src->window() != this)
+            return QWidget::eventFilter(watched, e);
+        auto* me = static_cast<QMouseEvent*>(e);
+        const QPoint gpos = me->globalPosition().toPoint();
+        const QPoint pos = mapFromGlobal(gpos);
+        // 标题栏按钮贴着窗口右上角：放行，避免点关闭/最小化被当成缩放
+        QWidget* child = childAt(pos);
+        if (child && qobject_cast<QToolButton*>(child))
+            return QWidget::eventFilter(watched, e);
+        if (t == QEvent::MouseButtonRelease) {
+            if (m_resizeEdge != 0) {
+                m_resizeEdge = 0;
+                m_resizeStartPos = QPoint();
+                return true;
+            }
+            return QWidget::eventFilter(watched, e);
+        }
+        if (t == QEvent::MouseButtonPress) {
+            if (me->button() == Qt::LeftButton) {
+                const int edges = detectResizeEdge(pos);
+                if (edges) {
+                    m_resizeEdge = edges;
+                    m_resizeStartPos = gpos;
+                    m_resizeStartGeo = geometry();
+                    return true;
+                }
+            }
+            return QWidget::eventFilter(watched, e);
+        }
+        // MouseMove
+        if (m_resizeEdge != 0) {
+            applyResize(gpos);
+            return true;
+        }
+        const int edges = detectResizeEdge(pos);
+        const Qt::CursorShape cur = resizeCursor(edges);
+        if (cur != Qt::ArrowCursor) {
+            setCursor(cur);
+            return true;   // 边缘区域不传给子控件
+        }
+        unsetCursor();
+    }
     return QWidget::eventFilter(watched, e);
 }
 
@@ -514,7 +1040,11 @@ void Oscilloscope::showRegexHelp() {
     root->setSpacing(8);
 
     auto* tip = new QLabel(QStringLiteral(
-        "每行文本只取第一个匹配：有捕获组时取第 1 组，没有捕获组时取整个匹配。\n"
+        "文本：以接收区的一个分包为单位（不是文本里的一行），每个正则在该分包上运行一次、"
+        "取第一个匹配；有捕获组时取第 1 组，没有捕获组时取整个匹配。\n"
+        "字节：同样以接收区的一个分包为一帧，按「第几字节」取值（从 1 开始数、区间含首尾；"
+        "第 1 字节即该分包收到的第一个字节，分隔符字节也在包内计入），"
+        "b=无符号 i=有符号，默认大端，末尾加 le 表示小端，最多 4 字节；包长不够时跳过该包。\n"
         "倍率只影响显示，不修改已提取的原始数据。点右侧按钮即可复制示例。"), &dlg);
     tip->setWordWrap(true);
     root->addWidget(tip);
@@ -532,6 +1062,11 @@ void Oscilloscope::showRegexHelp() {
         {"数字 + 单位（取数字）", "(\\d+)\\s*ms"},
         {"多个字段任取其一", "(?:th|temp)=(-?\\d+)"},
         {"十六进制数值", "0x([0-9A-Fa-f]+)"},
+        {"字节：第 2~3 字节（大端无符号）", "b2:3"},
+        {"字节：第 2~3 字节（小端无符号）", "b2:3le"},
+        {"字节：第 2~3 字节（大端有符号）", "i2:3"},
+        {"字节：第 2~3 字节（小端有符号）", "i2:3le"},
+        {"字节：第 5 个字节", "b5"},
     };
 
     auto* grid = new QGridLayout;
@@ -574,41 +1109,50 @@ void Oscilloscope::showRegexHelp() {
     dlg.exec();
 }
 
-void Oscilloscope::feed(const QString& text) {
-    if (text.isEmpty())
+void Oscilloscope::feed(const QString& text, const QByteArray& raw) {
+    if (text.isEmpty() && raw.isEmpty())
         return;
-    // 按行处理：一行数据最多产生一个点（取该行第一个匹配），
-    // 没有匹配到数字的行直接忽略。
-    const QStringList lines = text.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-    if (lines.isEmpty())
-        return;
+    // 一次 feed = 接收区的一个分包（＝一条 rx 记录），不是文本里的一行：
+    // 整包文本作为一次匹配的输入，每个正则只运行一次、取首个匹配；
+    // 字节取值：同一个分包按字节区间取一个整数。
+    QString line = text;
+    while (line.endsWith(QLatin1Char('\n')) || line.endsWith(QLatin1Char('\r')))
+        line.chop(1);
     bool changed = false;
+    auto appendValue = [&](OscSeries& s, double v) {
+        s.values.append(v);   // 只存原始值，倍率在绘制时换算
+        if (s.values.size() > kMaxPoints)
+            s.values.remove(0, s.values.size() - kMaxPoints);
+        changed = true;
+    };
     for (OscSeries& s : m_series) {
-        if (!s.enabled || s.pattern.isEmpty() || !s.regex.isValid())
+        if (!s.enabled || s.pattern.isEmpty())
             continue;
-        for (QString line : lines) {
-            if (line.endsWith(QLatin1Char('\r')))
-                line.chop(1);
-            if (line.isEmpty())
+        if (s.byteMode) {
+            double v = 0;
+            if (raw.isEmpty()
+                || !byteValueOf(raw, s.byteFrom, s.byteTo, s.byteBigEndian,
+                                s.byteSigned, v))
                 continue;
-            const QRegularExpressionMatch m = s.regex.match(line);
-            if (!m.hasMatch())
-                continue;
-            QString piece = m.lastCapturedIndex() >= 1 ? m.captured(1) : m.captured(0);
-            if (piece.isEmpty())
-                piece = m.captured(0);
-            const QRegularExpressionMatch nm = numberRe().match(piece);
-            if (!nm.hasMatch())
-                continue;
-            bool ok = false;
-            const double v = nm.captured().toDouble(&ok);
-            if (!ok || !std::isfinite(v))
-                continue;
-            s.values.append(v);   // 只存原始值，倍率在绘制时换算
-            if (s.values.size() > kMaxPoints)
-                s.values.remove(0, s.values.size() - kMaxPoints);
-            changed = true;
+            appendValue(s, v);
+            continue;
         }
+        if (!s.regex.isValid() || line.isEmpty())
+            continue;
+        const QRegularExpressionMatch m = s.regex.match(line);
+        if (!m.hasMatch())
+            continue;
+        QString piece = m.lastCapturedIndex() >= 1 ? m.captured(1) : m.captured(0);
+        if (piece.isEmpty())
+            piece = m.captured(0);
+        const QRegularExpressionMatch nm = numberRe().match(piece);
+        if (!nm.hasMatch())
+            continue;
+        bool ok = false;
+        const double v = nm.captured().toDouble(&ok);
+        if (!ok || !std::isfinite(v))
+            continue;
+        appendValue(s, v);
     }
     if (changed)
         m_chart->update();
@@ -647,11 +1191,46 @@ void Oscilloscope::fromJson(const QJsonArray& arr) {
         s.pattern = o.value(QStringLiteral("pattern")).toString();
         s.scaleText = o.value(QStringLiteral("scale")).toString(QStringLiteral("1"));
         parseScaleText(s.scaleText, s.scale);
-        s.regex = QRegularExpression(s.pattern);
+        bool sign = false, bigEndian = true;
+        int from = 1, to = 1;
+        if (parseByteSpec(s.pattern, sign, from, to, bigEndian)) {
+            s.byteMode = true;
+            s.byteFrom = from;
+            s.byteTo = to;
+            s.byteBigEndian = bigEndian;
+            s.byteSigned = sign;
+        } else {
+            s.regex = QRegularExpression(s.pattern);
+        }
         m_series.append(s);
     }
     if (m_series.isEmpty())
         m_series.append(OscSeries());
     rebuildRows();
     m_chart->update();
+}
+
+QJsonObject Oscilloscope::viewToJson() const {
+    QJsonObject o;
+    if (!m_chart)
+        return o;
+    const WaveView& v = m_chart->view();
+    o[QStringLiteral("x_span")] = v.xSpan;
+    o[QStringLiteral("x_right")] = v.xRight;
+    o[QStringLiteral("y_auto")] = v.yAuto;
+    o[QStringLiteral("y_min")] = v.yMin;
+    o[QStringLiteral("y_max")] = v.yMax;
+    return o;
+}
+
+void Oscilloscope::viewFromJson(const QJsonObject& o) {
+    if (!m_chart)
+        return;
+    WaveView v;
+    v.xSpan = o.value(QStringLiteral("x_span")).toInt(0);
+    v.xRight = o.value(QStringLiteral("x_right")).toInt(-1);
+    v.yAuto = o.value(QStringLiteral("y_auto")).toBool(true);
+    v.yMin = o.value(QStringLiteral("y_min")).toDouble(0);
+    v.yMax = o.value(QStringLiteral("y_max")).toDouble(1);
+    m_chart->setView(v);
 }

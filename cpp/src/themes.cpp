@@ -205,6 +205,7 @@ QToolButton#searchNav:hover, QToolButton#searchClose:hover{background:{btn_hover
 /* 标签页右上角 + 按钮 */
 QToolButton#tabCornerPlus{background:transparent;color:{accent};border:1px solid {accent};border-radius:11px;font-size:14px;font-weight:bold;padding:0;margin:0 2px;}
 QToolButton#tabCornerPlus:hover{background:{accent};color:#FFFFFF;}
+
 /* 选项卡右上角下拉箭头：小号图标按钮（默认浅底描边，悬停加深，展开时主色） */
 QToolButton#tabDropdown{background:{btn_bg};color:{text_secondary};border:1px solid {panel_border};border-radius:5px;font-size:10px;padding:0;}
 QToolButton#tabDropdown:hover{background:{btn_hover};color:{accent};border-color:{panel_border};}

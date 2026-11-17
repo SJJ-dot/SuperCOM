@@ -11,13 +11,20 @@
 
 class QMouseEvent;
 class QContextMenuEvent;
+class QHBoxLayout;
 
 class TitleBar : public QWidget {
     Q_OBJECT
 public:
-    explicit TitleBar(QWidget* window);
+    // appBar=true：主窗口标题栏（图标 + 标题/版本 + 示波器 + 主题 + 窗口按钮）
+    // appBar=false：子窗口标题栏（图标 + 自定义标题 + 窗口按钮，可插入自定义按钮）
+    explicit TitleBar(QWidget* window, bool appBar = true);
 
     void applyTheme(const sjj::ThemeColors& t, const QString& themeName);
+    void setTitleText(const QString& text);   // 自定义标题（子窗口用，不可点击）
+
+    // 在「最小化」左侧插入一个 30x30 按钮（如示波器的「?」）
+    QToolButton* insertBeforeControls(const QString& text, const QString& tip);
 
 signals:
     void versionClicked();   // 点击版本号（检查更新）
@@ -35,6 +42,8 @@ private:
     void toggleMax();
 
     QWidget* m_win = nullptr;          // 顶层窗口引用
+    bool m_appBar = true;              // 主窗口标题栏 / 子窗口标题栏
+    QHBoxLayout* m_lay = nullptr;
     QLabel* m_lblIcon = nullptr;
     QLabel* m_lblTitle = nullptr;
     QToolButton* m_btnOsc = nullptr;
