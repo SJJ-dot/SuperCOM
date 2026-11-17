@@ -1,6 +1,7 @@
 #include "oscilloscope.h"
 
 #include <QAbstractButton>
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QColor>
@@ -286,6 +287,32 @@ WaveChart::WaveChart(QWidget* parent) : QWidget(parent) {
     setMinimumHeight(240);
 }
 
+// 切换左键功能：清掉进行中的框选/平移，离开选点模式时收起十字线
+void WaveChart::setLeftMode(LeftMode m) {
+    if (m_leftMode == m)
+        return;
+    m_leftMode = m;
+    m_selActive = false;
+    m_panActive = false;
+    if (m != LeftMode::Pick) {
+        m_pickValid = false;
+        m_pickPinned = false;
+    }
+    setMouseTracking(m == LeftMode::Pick);
+    switch (m) {
+    case LeftMode::Box:
+        unsetCursor();
+        break;
+    case LeftMode::Pan:
+        setCursor(Qt::OpenHandCursor);
+        break;
+    case LeftMode::Pick:
+        setCursor(Qt::CrossCursor);
+        break;
+    }
+    update();
+}
+
 void WaveChart::bindSeries(const QVector<OscSeries>* series) {
     m_series = series;
     update();
@@ -557,6 +584,81 @@ void WaveChart::paintEvent(QPaintEvent*) {
         ++ci;
     }
 
+    // 选点十字线：横线标数值、竖线标采样序号，并在折线上标出焦点处的采样值
+    if (m_leftMode == LeftMode::Pick && m_pickValid && m_i1 >= m_i0) {
+        const QPoint cp(qBound(area.left(), m_pickPos.x(), area.right()),
+                        qBound(area.top(), m_pickPos.y(), area.bottom()));
+        const QColor accent(m_tc.value(QStringLiteral("accent")));
+        // 对齐到设备像素中心：缩放比例不是整数时，1px 线会时而落在 1 个设备像素、
+        // 时而压住 2 个，看起来忽粗忽细；对齐后始终是 1 个设备像素
+        const qreal dpr = devicePixelRatioF();
+        auto snapPx = [dpr](qreal v) { return (std::floor(v * dpr) + 0.5) / dpr; };
+        const qreal crossX = snapPx(cp.x());
+        const qreal crossY = snapPx(cp.y());
+        p.save();
+        QPen cross(accent);
+        cross.setStyle(m_pickPinned ? Qt::SolidLine : Qt::DashLine);   // 固定后实线
+        p.setPen(cross);
+        p.drawLine(QPointF(crossX, area.top()), QPointF(crossX, area.bottom()));
+        p.drawLine(QPointF(area.left(), crossY), QPointF(area.right(), crossY));
+
+        const QFontMetrics fm(font());
+        const QColor accentFg(m_tc.value(QStringLiteral("accent_fg")));
+        auto chip = [&](const QRect& box, const QString& text) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(accent);
+            p.drawRoundedRect(box, 3, 3);
+            p.setPen(accentFg);
+            p.drawText(box, Qt::AlignCenter, text);
+        };
+        const QString yText = formatValue(valueAtY(cp.y()));
+        const int yW = fm.horizontalAdvance(yText) + 10;
+        chip(QRect(area.left() - yW - 4, int(qRound(crossY)) - 9, yW, 18), yText);
+        const QString xText = QString::number(indexAtX(cp.x()));
+        const int xW = fm.horizontalAdvance(xText) + 12;
+        int xLeft = qBound(2, int(qRound(crossX)) - xW / 2, qMax(2, width() - xW - 2));
+        chip(QRect(xLeft, area.bottom() + 3, xW, 18), xText);
+
+        // 焦点值：竖线所在序号上，每条折线最近的采样点画圆点并标出数值
+        const int focus = indexAtX(cp.x());
+        int ci = 0;
+        for (int si = 0; si < m_series->size(); ++si) {
+            const OscSeries& s = m_series->at(si);
+            const QColor color = seriesColors().at(ci % seriesColors().size());
+            ++ci;
+            if (!s.enabled || s.indices.isEmpty())
+                continue;
+            int k = int(std::lower_bound(s.indices.cbegin(), s.indices.cend(), focus)
+                        - s.indices.cbegin());
+            if (k >= s.indices.size())
+                --k;
+            else if (k > 0 && focus - s.indices.at(k - 1) <= s.indices.at(k) - focus)
+                --k;   // 取前后最近的那个采样点
+            if (k < 0)
+                continue;
+            const int idx = s.indices.at(k);
+            if (idx < i0 || idx > i1)
+                continue;
+            const QPointF pt(toX(idx), toY(s.values.at(k) * s.scale));
+            if (!area.contains(pt.toPoint()))
+                continue;
+            p.setPen(Qt::NoPen);
+            p.setBrush(color);
+            p.drawEllipse(pt, 3.2, 3.2);
+            const QString text = formatValue(s.values.at(k) * s.scale);
+            const int w = fm.horizontalAdvance(text) + 10;
+            int lx = int(pt.x()) + 8;
+            if (lx + w > area.right())
+                lx = int(pt.x()) - 8 - w;   // 靠右边缘时贴到左侧
+            const QRect box(lx, int(pt.y()) - 9, w, 18);
+            p.setBrush(QColor(m_tc.value(QStringLiteral("panel_bg"))));
+            p.drawRoundedRect(box, 3, 3);
+            p.setPen(color);
+            p.drawText(box, Qt::AlignCenter, text);
+        }
+        p.restore();
+    }
+
     // 框选中的橡皮筋
     if (m_selActive) {
         const QRect sel = QRect(m_selFrom, m_selTo).normalized().intersected(area);
@@ -726,11 +828,28 @@ void WaveChart::wheelEvent(QWheelEvent* e) {
 }
 
 void WaveChart::mousePressEvent(QMouseEvent* e) {
-    if (e->button() == Qt::LeftButton && m_i1 >= m_i0
-        && m_plot.contains(e->position().toPoint())) {
-        m_selActive = true;
-        m_selFrom = m_selTo = e->position().toPoint();
-        setCursor(Qt::CrossCursor);
+    const QPoint pos = e->position().toPoint();
+    if (e->button() == Qt::LeftButton && m_i1 >= m_i0 && m_plot.contains(pos)) {
+        switch (m_leftMode) {
+        case LeftMode::Box:
+            m_selActive = true;
+            m_selFrom = m_selTo = pos;
+            setCursor(Qt::CrossCursor);
+            break;
+        case LeftMode::Pan:
+            m_panActive = true;
+            m_panOrigin = pos;
+            m_panStartRight = m_i1;
+            m_panSpan = qMax(2, m_i1 - m_i0 + 1);
+            setCursor(Qt::ClosedHandCursor);
+            break;
+        case LeftMode::Pick:
+            // 点一下固定十字线（不再跟随），再点一下恢复跟随
+            m_pickPinned = !m_pickPinned;
+            m_pickValid = true;
+            m_pickPos = pos;
+            break;
+        }
         update();
         e->accept();
         return;
@@ -739,11 +858,36 @@ void WaveChart::mousePressEvent(QMouseEvent* e) {
 }
 
 void WaveChart::mouseMoveEvent(QMouseEvent* e) {
+    const QPoint pos = e->position().toPoint();
     if (m_selActive) {
-        const QPoint p(e->position().toPoint().x(), e->position().toPoint().y());
-        m_selTo = QPoint(qBound(m_plot.left(), p.x(), m_plot.right()),
-                         qBound(m_plot.top(), p.y(), m_plot.bottom()));
+        m_selTo = QPoint(qBound(m_plot.left(), pos.x(), m_plot.right()),
+                         qBound(m_plot.top(), pos.y(), m_plot.bottom()));
         update();
+        e->accept();
+        return;
+    }
+    if (m_panActive) {
+        // 拖拽平移：鼠标水平位移换算成序号偏移，窗口点数保持不变（拖到最近后停住）
+        if (m_plot.width() > 0 && m_panSpan > 1) {
+            const int first = dataFirst();
+            const int last = first + qMax(0, dataCount()) - 1;
+            const int minRight = first + m_panSpan - 1;
+            const int delta = int(qRound(double(pos.x() - m_panOrigin.x())
+                                         / m_plot.width() * m_panSpan));
+            m_view.xSpan = m_panSpan;
+            m_view.xRight = qBound(minRight, m_panStartRight - delta, qMax(minRight, last));
+        }
+        update();
+        e->accept();
+        return;
+    }
+    if (m_leftMode == LeftMode::Pick && !m_pickPinned && m_plot.contains(pos)) {
+        // 选点：鼠标在绘图区内移动时十字线跟随，读出横线数值与竖线序号
+        if (!m_pickValid || m_pickPos != pos) {
+            m_pickValid = true;
+            m_pickPos = pos;
+            update();
+        }
         e->accept();
         return;
     }
@@ -751,6 +895,13 @@ void WaveChart::mouseMoveEvent(QMouseEvent* e) {
 }
 
 void WaveChart::mouseReleaseEvent(QMouseEvent* e) {
+    if (e->button() == Qt::LeftButton && m_panActive) {
+        m_panActive = false;
+        setCursor(Qt::OpenHandCursor);
+        update();
+        e->accept();
+        return;
+    }
     if (e->button() == Qt::LeftButton && m_selActive) {
         m_selActive = false;
         unsetCursor();
@@ -872,6 +1023,34 @@ Oscilloscope::Oscilloscope(QWidget* parent) : QWidget(parent) {
     m_btnCfg->setToolTip(QStringLiteral("打开提取表达式配置（关闭后收起，改动立即生效）"));
     connect(m_btnCfg, &QPushButton::clicked, this, &Oscilloscope::openConfig);
     bar->addWidget(m_btnCfg);
+    // 左键功能：框选放大 / 拖拽平移 / 选点读数（互斥勾选，状态随视图配置保存）
+    bar->addSpacing(8);
+    auto* modeLabel = new QLabel(QStringLiteral("左键"), content);
+    modeLabel->setStyleSheet(QStringLiteral("background:transparent;"));
+    bar->addWidget(modeLabel);
+    auto* modeGrp = new QButtonGroup(this);
+    modeGrp->setExclusive(true);
+    auto addMode = [&](const QString& text, const QString& tip, WaveChart::LeftMode m) {
+        auto* b = new QPushButton(text, content);
+        b->setObjectName(QStringLiteral("oscMode"));
+        b->setCheckable(true);
+        b->setFocusPolicy(Qt::NoFocus);
+        b->setToolTip(tip);
+        modeGrp->addButton(b);
+        connect(b, &QPushButton::clicked, this, [this, m] { m_chart->setLeftMode(m); });
+        bar->addWidget(b);
+        return b;
+    };
+    m_btnModeBox = addMode(QStringLiteral("框选"),
+                           QStringLiteral("按住左键拖出矩形，放大到该范围（纵轴同时缩放）"),
+                           WaveChart::LeftMode::Box);
+    m_btnModePan = addMode(QStringLiteral("拖拽"),
+                           QStringLiteral("按住左键左右拖动，平移显示范围"),
+                           WaveChart::LeftMode::Pan);
+    m_btnModePick = addMode(QStringLiteral("选点"),
+                            QStringLiteral("移动鼠标显示十字线并读出焦点数值；点击固定十字线，再点恢复跟随"),
+                            WaveChart::LeftMode::Pick);
+    m_btnModeBox->setChecked(true);
     bar->addStretch(1);
     auto* btnClear = new QPushButton(QStringLiteral("清空数据"), content);
     connect(btnClear, &QPushButton::clicked, this, &Oscilloscope::clearData);
@@ -995,7 +1174,9 @@ void Oscilloscope::showHelp() {
                         "鼠标操作\n"
                         "· 滚轮：缩放横轴（时间窗）\n"
                         "· Shift / Ctrl + 滚轮：缩放纵轴\n"
-                        "· 左键拖拽：框选放大\n"
+                        "· 左键：按下方「框选 / 拖拽 / 选点」切换功能——"
+                        "框选拖出矩形放大；拖拽左右平移；选点显示十字线与焦点数值，"
+                        "点击固定十字线、再点恢复跟随\n"
                         "· 双击：恢复全部数据\n"
                         "· 右键：重置 / 自动纵轴 / 最新数据\n\n"
                         "提取表达式（每个表达式一条折线，倍率只影响显示）\n"
@@ -1075,6 +1256,23 @@ void Oscilloscope::updateCfgButton() {
             ++on;
     }
     m_btnCfg->setText(QStringLiteral("提取表达式（%1/%2）").arg(on).arg(m_series.size()));
+}
+
+// 左键功能按钮与图表当前模式保持一致（从配置恢复时用）
+void Oscilloscope::syncModeButtons() {
+    if (!m_chart || !m_btnModeBox)
+        return;
+    switch (m_chart->leftMode()) {
+    case WaveChart::LeftMode::Box:
+        m_btnModeBox->setChecked(true);
+        break;
+    case WaveChart::LeftMode::Pan:
+        m_btnModePan->setChecked(true);
+        break;
+    case WaveChart::LeftMode::Pick:
+        m_btnModePick->setChecked(true);
+        break;
+    }
 }
 
 bool Oscilloscope::parseScale(const QString& text, double& out) {
@@ -1503,6 +1701,7 @@ QJsonObject Oscilloscope::viewToJson() const {
     o[QStringLiteral("y_auto")] = v.yAuto;
     o[QStringLiteral("y_min")] = v.yMin;
     o[QStringLiteral("y_max")] = v.yMax;
+    o[QStringLiteral("left_mode")] = int(m_chart->leftMode());
     return o;
 }
 
@@ -1516,4 +1715,9 @@ void Oscilloscope::viewFromJson(const QJsonObject& o) {
     v.yMin = o.value(QStringLiteral("y_min")).toDouble(0);
     v.yMax = o.value(QStringLiteral("y_max")).toDouble(1);
     m_chart->setView(v);
+    const int lm = o.value(QStringLiteral("left_mode")).toInt(0);
+    m_chart->setLeftMode(lm == 1 ? WaveChart::LeftMode::Pan
+                                 : lm == 2 ? WaveChart::LeftMode::Pick
+                                           : WaveChart::LeftMode::Box);
+    syncModeButtons();
 }

@@ -84,6 +84,11 @@ public:
     void setView(const WaveView& v);
     void resetView();                         // 全部数据 + 跟随最新 + 纵轴自动
 
+    // 左键功能：框选放大 / 拖拽平移 / 选点十字线读数
+    enum class LeftMode { Box, Pan, Pick };
+    LeftMode leftMode() const { return m_leftMode; }
+    void setLeftMode(LeftMode m);
+
 protected:
     void paintEvent(QPaintEvent* e) override;
     void wheelEvent(QWheelEvent* e) override;
@@ -132,6 +137,16 @@ private:
 
     bool m_selActive = false;                // 正在拖拽框选
     QPoint m_selFrom, m_selTo;
+
+    LeftMode m_leftMode = LeftMode::Box;     // 左键当前功能
+    bool m_panActive = false;                // 正在拖拽平移
+    QPoint m_panOrigin;                      // 按下时的鼠标位置
+    int m_panStartRight = -1;                // 按下时窗口右端序号
+    int m_panSpan = 0;                       // 按下时窗口点数
+
+    bool m_pickValid = false;                // 选点十字线是否显示
+    bool m_pickPinned = false;               // 十字线已固定：不再跟随鼠标，再次点击恢复
+    QPoint m_pickPos;                        // 十字线位置（已夹到绘图区内）
 };
 
 class Oscilloscope : public QWidget {
@@ -185,6 +200,10 @@ private:
     QScrollArea* m_rowsScroll = nullptr;      // 弹窗内的表达式行容器
     QVBoxLayout* m_rowsLay = nullptr;
     QPushButton* m_btnCfg = nullptr;          // 主界面「提取表达式（启用/总数）」入口
+    QPushButton* m_btnModeBox = nullptr;      // 左键：框选放大
+    QPushButton* m_btnModePan = nullptr;      // 左键：拖拽平移
+    QPushButton* m_btnModePick = nullptr;     // 左键：选点（十字线读数）
+    void syncModeButtons();                   // 按钮勾选状态与图表左键模式同步
     TitleBar* m_titleBar = nullptr;           // 自绘标题栏（含「?」帮助按钮）
     WaveChart* m_chart = nullptr;
     sjj::ThemeColors m_tc;

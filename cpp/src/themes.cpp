@@ -134,6 +134,10 @@ QPushButton{background-color:{btn_bg};color:{btn_fg};border:1px solid {input_bor
 QPushButton:hover{background-color:{btn_hover};}
 QPushButton:pressed{background-color:{panel_border};}
 QPushButton:disabled{color:{text_secondary};}
+/* 示波器左键功能：三选一，勾选态用强调色区分 */
+QPushButton#oscMode{background-color:{btn_bg};color:{btn_fg};border:1px solid {input_border};border-radius:5px;padding:3px 8px;}
+QPushButton#oscMode:hover{background-color:{btn_hover};}
+QPushButton#oscMode:checked{background-color:{accent};color:{accent_fg};border-color:{accent};}
 /* 强调按钮：按功能区分颜色（Catppuccin 调色板，深浅主题均清晰） */
 QPushButton#btnConnect{background-color:#40A02B;color:#FFFFFF;border-color:#40A02B;}
 QPushButton#btnConnect:hover{background-color:#36821F;}
