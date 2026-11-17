@@ -109,62 +109,157 @@ const QRegularExpression& numberRe() {
 
 // 字节取值写法：b2 / b2:3 / b2:3le / i2:3（b=无符号 i=有符号，le=小端，默认大端）
 // 「第 N 字节」从 1 开始计数，区间含首尾。
-bool parseByteSpec(const QString& text, bool& sign, int& from, int& to,
-                   bool& bigEndian) {
+// 可追加帧校验：#1=02,2=03,len=8,len>=6,sum=0,xor=0,crc16=0（逗号分隔）
+bool parseByteSpec(const QString& text, OscByteSpec& out) {
+    out = OscByteSpec();
     QString t = text.trimmed();
+    if (t.size() < 2)
+        return false;
+
+    // 先切出 # 之后的帧校验条件
+    QStringList conds;
+    const int hash = t.indexOf(QLatin1Char('#'));
+    if (hash >= 0) {
+        const QString tail = t.mid(hash + 1).trimmed();
+        if (!tail.isEmpty())
+            conds = tail.split(QRegularExpression(QStringLiteral("[,，]")),
+                               Qt::SkipEmptyParts);
+        t = t.left(hash).trimmed();
+    }
+
+    // 取值区间
     if (t.size() < 2)
         return false;
     const QChar head = t.at(0).toLower();
     if (head != QLatin1Char('b') && head != QLatin1Char('i'))
         return false;
-    sign = (head == QLatin1Char('i'));
+    out.sign = (head == QLatin1Char('i'));
     t.remove(0, 1);
     const QString lt = t.toLower();
     if (lt.endsWith(QLatin1String("le"))) {
-        bigEndian = false;
+        out.bigEndian = false;
         t.chop(2);
     } else if (lt.endsWith(QLatin1String("be"))) {
-        bigEndian = true;
         t.chop(2);
-    } else {
-        bigEndian = true;
     }
     const QStringList parts = t.split(QLatin1Char(':'));
     if (parts.isEmpty() || parts.size() > 2)
         return false;
     bool okA = false;
-    from = parts.at(0).toInt(&okA);
+    out.from = parts.at(0).toInt(&okA);
     if (!okA)
         return false;
     if (parts.size() == 2) {
         bool okB = false;
-        to = parts.at(1).toInt(&okB);
+        out.to = parts.at(1).toInt(&okB);
         if (!okB)
             return false;
     } else {
-        to = from;
+        out.to = out.from;
     }
     // 只接受 1~4 字节整数（double 可精确表示）
-    if (from < 1 || to < from || (to - from + 1) > 4)
+    if (out.from < 1 || out.to < out.from || (out.to - out.from + 1) > 4)
         return false;
+
+    // 帧校验条件
+    for (QString c : conds) {
+        c = c.trimmed().toLower();
+        if (c.isEmpty())
+            continue;
+        if (c.startsWith(QLatin1String("len"))) {
+            const bool ge = c.contains(QLatin1String(">="));
+            const int eq = c.indexOf(QLatin1Char('='));
+            if (eq < 0)
+                return false;
+            bool ok = false;
+            const int v = c.mid(eq + 1).trimmed().toInt(&ok);
+            if (!ok || v < 1)
+                return false;
+            if (ge) {
+                out.check.lenMin = v;
+            } else {
+                out.check.lenExact = v;
+            }
+            continue;
+        }
+        if (c == QLatin1String("crc16") || c == QLatin1String("crc16=0")) {
+            out.check.crc16Modbus = true;
+            continue;
+        }
+        const int eq = c.indexOf(QLatin1Char('='));
+        if (eq <= 0)
+            return false;
+        const QString key = c.left(eq).trimmed();
+        bool okV = false;
+        const int v = c.mid(eq + 1).trimmed().toInt(&okV, 16);
+        if (!okV || v < 0 || v > 0xFF)
+            return false;
+        if (key == QLatin1String("sum")) {
+            out.check.sum8 = v;
+        } else if (key == QLatin1String("xor")) {
+            out.check.xor8 = v;
+        } else {
+            bool okIdx = false;
+            const int idx = key.toInt(&okIdx);
+            if (!okIdx || idx < 1)
+                return false;
+            out.check.byteEq.append(qMakePair(idx, v));
+        }
+    }
+    return true;
+}
+
+// 帧校验：长度 / 指定字节 / 累加和 / 异或和 / Modbus CRC16
+bool frameCheckPass(const QByteArray& raw, const OscFrameCheck& c) {
+    if (c.lenExact >= 0 && raw.size() != c.lenExact)
+        return false;
+    if (c.lenMin > 0 && raw.size() < c.lenMin)
+        return false;
+    for (const auto& eq : c.byteEq) {
+        if (raw.size() < eq.first || quint8(raw.at(eq.first - 1)) != eq.second)
+            return false;
+    }
+    if (c.sum8 >= 0) {
+        int acc = 0;
+        for (char b : raw)
+            acc = (acc + quint8(b)) & 0xFF;
+        if (acc != c.sum8)
+            return false;
+    }
+    if (c.xor8 >= 0) {
+        int x = 0;
+        for (char b : raw)
+            x ^= quint8(b);
+        if (x != c.xor8)
+            return false;
+    }
+    if (c.crc16Modbus) {
+        quint16 crc = 0xFFFF;
+        for (char b : raw) {
+            crc ^= quint8(b);
+            for (int i = 0; i < 8; ++i)
+                crc = (crc & 1) ? quint16((crc >> 1) ^ 0xA001) : quint16(crc >> 1);
+        }
+        if (crc != 0)
+            return false;
+    }
     return true;
 }
 
 // 按区间从原始字节取整数；帧长度不足时返回 false
-bool byteValueOf(const QByteArray& raw, int from, int to, bool bigEndian,
-                 bool sign, double& out) {
-    const int n = to - from + 1;
-    if (raw.size() < to)
+bool byteValueOf(const QByteArray& raw, const OscByteSpec& spec, double& out) {
+    const int n = spec.to - spec.from + 1;
+    if (raw.size() < spec.to)
         return false;
     quint64 v = 0;
-    if (bigEndian) {
+    if (spec.bigEndian) {
         for (int i = 0; i < n; ++i)
-            v = (v << 8) | quint8(raw.at(from - 1 + i));
+            v = (v << 8) | quint8(raw.at(spec.from - 1 + i));
     } else {
         for (int i = n - 1; i >= 0; --i)
-            v = (v << 8) | quint8(raw.at(from - 1 + i));
+            v = (v << 8) | quint8(raw.at(spec.from - 1 + i));
     }
-    if (sign) {
+    if (spec.sign) {
         const int bits = n * 8;
         const quint64 signBit = quint64(1) << (bits - 1);
         if (v & signBit)
@@ -756,6 +851,10 @@ void Oscilloscope::showHelp() {
                         "· 文本：正则如 xpp=(\\d+)，取该分包第一个匹配\n"
                         "· 字节：b2:3 大端 / b2:3le 小端 / i2:3 有符号 / i2:3le 小端有符号"
                         " / b5 单字节（第 1 字节起算）\n"
+                        "· 帧校验（字节取值可加在 # 之后）：b2:3#1=02,2=03 校帧头，"
+                        "len=8 / len>=6 校长度；sum=0 / xor=0 / crc16=0 表示整包（含帧尾校验字节）"
+                        "按累加和 / 异或 / Modbus CRC 算出来等于 0，即协议里校验通过的帧；"
+                        "不满足的分包（如混在其中的日志）不画点\n"
                         "· 「清空数据」只清曲线，不改表达式配置"),
                     QMessageBox::NoButton, this);
     QAbstractButton* btnOk =
@@ -853,15 +952,11 @@ void Oscilloscope::applyPattern(int idx, const QString& text) {
         return;
     OscSeries& s = m_series[idx];
     s.pattern = text;
-    bool sign = false, bigEndian = true;
-    int from = 1, to = 1;
-    if (parseByteSpec(text, sign, from, to, bigEndian)) {
-        // 字节取值：不编译正则，按字节区间从原始帧里取
+    OscByteSpec spec;
+    if (parseByteSpec(text, spec)) {
+        // 字节取值：不编译正则，按字节区间从原始帧里取（可带帧校验）
         s.byteMode = true;
-        s.byteFrom = from;
-        s.byteTo = to;
-        s.byteBigEndian = bigEndian;
-        s.byteSigned = sign;
+        s.byte = spec;
         s.regex = QRegularExpression();
     } else {
         s.byteMode = false;
@@ -920,7 +1015,8 @@ void Oscilloscope::rebuildRows() {
         r.pattern->setPlaceholderText(QStringLiteral("正则如 xpp=(\\d+)；字节如 b2:3"));
         r.pattern->setToolTip(QStringLiteral(
             "文本：正则，该分包第一处匹配的数字即为取值（每包每正则只取一个点）\n"
-            "字节：b2:3 取第 2~3 字节（大端无符号），b2:3le 小端，i2:3 有符号，b5 单字节"));
+            "字节：b2:3 取第 2~3 字节（大端无符号），b2:3le 小端，i2:3 有符号，b5 单字节\n"
+            "帧校验：b2:3#1=02,2=03 校帧头；另可 len=8 / len>=6 / sum=0 / xor=0 / crc16=0"));
         r.pattern->installEventFilter(this);   // 窗口未激活时首次单击即可编辑
         connect(r.pattern, &QLineEdit::textChanged, this,
                 [this, i](const QString& t) { applyPattern(i, t); });
@@ -1045,6 +1141,14 @@ void Oscilloscope::showRegexHelp() {
         "字节：同样以接收区的一个分包为一帧，按「第几字节」取值（从 1 开始数、区间含首尾；"
         "第 1 字节即该分包收到的第一个字节，分隔符字节也在包内计入），"
         "b=无符号 i=有符号，默认大端，末尾加 le 表示小端，最多 4 字节；包长不够时跳过该包。\n"
+        "帧校验：字节取值可在 # 后面追加条件，用逗号分隔——1=02 指定第 1 字节必须是 0x02，"
+        "len=8 整包必须 8 字节，len>=6 至少 6 字节。\n"
+        "  校验和类的 sum=0 / xor=0 / crc16=0，含义是「把这个包的所有字节（含帧尾的校验字节）"
+        "按该算法算一遍，结果等于 0」，也就是协议里校验通过的帧，不是「校验字节等于 0」。\n"
+        "  · sum=0：逐字节相加只保留低 8 位，如 01 02 03 FA（01+02+03=06，校验收尾 FA），整包相加=0x100→低 8 位为 0\n"
+        "  · xor=0：逐字节异或，如 01 02 03 00（01^02^03=00），整包异或为 0\n"
+        "  · crc16=0：两个字节的 Modbus CRC16（低字节在前），如 02 03 CB 01 67 6C，67 6C 就是 CRC\n"
+        "  不满足条件的分包（例如混在协议里的日志）不会画点。\n"
         "倍率只影响显示，不修改已提取的原始数据。点右侧按钮即可复制示例。"), &dlg);
     tip->setWordWrap(true);
     root->addWidget(tip);
@@ -1067,6 +1171,12 @@ void Oscilloscope::showRegexHelp() {
         {"字节：第 2~3 字节（大端有符号）", "i2:3"},
         {"字节：第 2~3 字节（小端有符号）", "i2:3le"},
         {"字节：第 5 个字节", "b5"},
+        {"字节 + 帧头校验（第 1=02、第 2=03）", "b2:3#1=02,2=03"},
+        {"字节 + 长度校验（整包 8 字节）", "b2:3#len=8"},
+        {"字节 + 累加和校验（整包低 8 位和为 0）", "b2:3#sum=0"},
+        {"字节 + 异或校验（整包异或为 0）", "b2:3#xor=0"},
+        {"字节 + Modbus CRC16（整包 CRC 为 0）", "b2:3#crc16=0"},
+        {"字节 + 帧头/长度/累加和（日志混流）", "b2:3#1=02,2=03,len=8,sum=0"},
     };
 
     auto* grid = new QGridLayout;
@@ -1129,10 +1239,11 @@ void Oscilloscope::feed(const QString& text, const QByteArray& raw) {
         if (!s.enabled || s.pattern.isEmpty())
             continue;
         if (s.byteMode) {
+            // 先做帧校验（长度/帧头/校验和），不通过的分包（如日志行）直接丢弃
+            if (raw.isEmpty() || !frameCheckPass(raw, s.byte.check))
+                continue;
             double v = 0;
-            if (raw.isEmpty()
-                || !byteValueOf(raw, s.byteFrom, s.byteTo, s.byteBigEndian,
-                                s.byteSigned, v))
+            if (!byteValueOf(raw, s.byte, v))
                 continue;
             appendValue(s, v);
             continue;
@@ -1191,14 +1302,10 @@ void Oscilloscope::fromJson(const QJsonArray& arr) {
         s.pattern = o.value(QStringLiteral("pattern")).toString();
         s.scaleText = o.value(QStringLiteral("scale")).toString(QStringLiteral("1"));
         parseScaleText(s.scaleText, s.scale);
-        bool sign = false, bigEndian = true;
-        int from = 1, to = 1;
-        if (parseByteSpec(s.pattern, sign, from, to, bigEndian)) {
+        OscByteSpec spec;
+        if (parseByteSpec(s.pattern, spec)) {
             s.byteMode = true;
-            s.byteFrom = from;
-            s.byteTo = to;
-            s.byteBigEndian = bigEndian;
-            s.byteSigned = sign;
+            s.byte = spec;
         } else {
             s.regex = QRegularExpression(s.pattern);
         }

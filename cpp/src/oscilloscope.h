@@ -6,6 +6,7 @@
 #include <QVector>
 #include <QString>
 #include <QByteArray>
+#include <QPair>
 #include <QRegularExpression>
 
 #include <functional>
@@ -29,6 +30,25 @@ class QWheelEvent;
 class QMouseEvent;
 class QContextMenuEvent;
 
+// 字节取值的帧校验：不满足条件的分包直接跳过（用于日志与协议混流）
+struct OscFrameCheck {
+    int lenExact = -1;                  // 包长必须等于（-1=不校验）
+    int lenMin = 0;                     // 包长下限（0=不校验）
+    int sum8 = -1;                      // 累加和低 8 位期望值（-1=不校验）
+    int xor8 = -1;                      // 异或和期望值（-1=不校验）
+    bool crc16Modbus = false;           // Modbus CRC16 整包校验（含 CRC 时为 0）
+    QVector<QPair<int, int>> byteEq;    // (第几字节, 期望值)：1 基
+};
+
+// 字节取值写法：b2:3 / b2:3le / i2:3 / b5，可用 # 追加帧校验
+struct OscByteSpec {
+    int from = 1;
+    int to = 1;
+    bool bigEndian = true;
+    bool sign = false;
+    OscFrameCheck check;
+};
+
 // 一条折线：表达式 + 倍率 + 已提取的数据
 struct OscSeries {
     bool enabled = true;
@@ -38,10 +58,7 @@ struct OscSeries {
     QRegularExpression regex;
     // 字节取值（pattern 写成 b2:3 这类写法时生效，1 基、含首尾）
     bool byteMode = false;
-    int byteFrom = 1;
-    int byteTo = 1;
-    bool byteBigEndian = true;
-    bool byteSigned = false;
+    OscByteSpec byte;
     QVector<double> values;
 };
 
