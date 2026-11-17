@@ -102,5 +102,6 @@ bool versionIsNewer(const QString& latest, const QString& current);
 // ============ 主题图标（手绘，避免依赖 QtSvg） ============
 QIcon makeSunIcon(const QColor& color, int size = 14);   // 亮色实心圆
 QIcon makeMoonIcon(const QColor& color, int size = 14);  // 月亮
+QIcon makeOscilloIcon(const QColor& color, int size = 14); // 示波器波形
 
 } // namespace sjj

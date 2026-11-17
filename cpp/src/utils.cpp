@@ -8,6 +8,8 @@
 #include <QPixmap>
 #include <QRegularExpression>
 
+#include <cmath>
+
 namespace sjj {
 
 QString nowTimestamp() {
@@ -326,6 +328,30 @@ QIcon makeMoonIcon(const QColor& color, int size) {
     QPainterPath mask;
     mask.addEllipse(QRectF(size * 0.44, size * 0.30, size * 0.60, size * 0.60));
     p.fillPath(full.subtracted(mask), color);
+    p.end();
+    return QIcon(pm);
+}
+
+QIcon makeOscilloIcon(const QColor& color, int size) {
+    QPixmap pm(size, size);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    QPen pen(color);
+    pen.setWidthF(qMax(1.2, size / 10.0));
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(pen);
+    // 两个周期的波形：横轴是次数，纵轴是数值
+    QPolygonF pts;
+    const int n = 28;
+    for (int i = 0; i <= n; ++i) {
+        const qreal x = 1.0 + (size - 2.0) * i / n;
+        const qreal pi = 3.14159265358979323846;
+        const qreal y = size * 0.5 + size * 0.26 * std::sin(4.0 * pi * i / n);
+        pts << QPointF(x, y);
+    }
+    p.drawPolyline(pts);
     p.end();
     return QIcon(pm);
 }

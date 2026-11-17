@@ -18,6 +18,7 @@
 #include "combobox.h"
 #include "themechkbox.h"
 #include "titlebar.h"
+#include "oscilloscope.h"
 
 class QTextEdit;
 class QLabel;
@@ -225,6 +226,7 @@ private:
 
     // ---------- 面板切换 ----------
     void toggleWindow(int tabIndex);
+    void toggleOscilloscope();             // 标题栏示波器按钮：显示/隐藏示波器窗口
 
     // ---------- GitHub ----------
     void openGithub();
@@ -247,6 +249,7 @@ private:
 
     // ============ 控件 ============
     TitleBar* m_titleBar = nullptr;
+    Oscilloscope* m_oscillo = nullptr;       // 独立浮窗：按正则提取接收数字画折线
 
     QTextEdit* m_txtRecv = nullptr;
     QGroupBox* m_recvBox = nullptr;      // 接收区容器（滚动条下方悬浮按钮的定位基准）

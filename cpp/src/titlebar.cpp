@@ -36,7 +36,12 @@ TitleBar::TitleBar(QWidget* window) : QWidget(window), m_win(window) {
     h->addWidget(m_lblTitle);
     h->addStretch(1);
 
-    // 按钮：主题切换 → 最小化 → 最大化 → 关闭
+    // 按钮：示波器 → 主题切换 → 最小化 → 最大化 → 关闭
+    m_btnOsc = new QToolButton(this);
+    m_btnOsc->setObjectName(QStringLiteral("btn_oscil"));
+    m_btnOsc->setIconSize(QSize(16, 16));
+    m_btnOsc->setToolTip(QStringLiteral("示波器：按正则提取接收数据中的数字并画折线"));
+    connect(m_btnOsc, &QToolButton::clicked, this, &TitleBar::oscilloClicked);
     m_btnTheme = new QToolButton(this);
     m_btnTheme->setObjectName(QStringLiteral("btn_theme"));
     m_btnTheme->setIconSize(QSize(14, 14));
@@ -52,7 +57,7 @@ TitleBar::TitleBar(QWidget* window) : QWidget(window), m_win(window) {
     m_btnClose->setText(QStringLiteral("\u2715"));
     m_btnClose->setObjectName(QStringLiteral("btn_close"));
     m_btnClose->setToolTip(QStringLiteral("关闭"));
-    for (auto* b : {m_btnTheme, m_btnMin, m_btnMax, m_btnClose}) {
+    for (auto* b : {m_btnOsc, m_btnTheme, m_btnMin, m_btnMax, m_btnClose}) {
         b->setFixedSize(30, 30);
         h->addWidget(b);
     }
@@ -65,6 +70,7 @@ TitleBar::TitleBar(QWidget* window) : QWidget(window), m_win(window) {
 void TitleBar::applyTheme(const sjj::ThemeColors& t, const QString& themeName) {
     // 标题栏配色由全局 QSS #titleBar 选择器控制；此处仅更新主题切换按钮图标
     const QColor iconColor(t.value(QStringLiteral("titlebar_fg")));
+    m_btnOsc->setIcon(sjj::makeOscilloIcon(iconColor, 16));
     if (themeName == QStringLiteral("dark")) {   // 当前深色 → 显示亮色太阳（点击切回浅色）
         m_btnTheme->setIcon(sjj::makeSunIcon(iconColor));
         m_btnTheme->setToolTip(QStringLiteral("切换到浅色模式"));

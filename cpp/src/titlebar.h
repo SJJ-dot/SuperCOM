@@ -22,6 +22,7 @@ public:
 signals:
     void versionClicked();   // 点击版本号（检查更新）
     void themeClicked();     // 点击主题切换按钮
+    void oscilloClicked();   // 点击示波器按钮
 
 protected:
     void mousePressEvent(QMouseEvent* e) override;
@@ -36,6 +37,7 @@ private:
     QWidget* m_win = nullptr;          // 顶层窗口引用
     QLabel* m_lblIcon = nullptr;
     QLabel* m_lblTitle = nullptr;
+    QToolButton* m_btnOsc = nullptr;
     QToolButton* m_btnTheme = nullptr;
     QToolButton* m_btnMin = nullptr;
     QToolButton* m_btnMax = nullptr;

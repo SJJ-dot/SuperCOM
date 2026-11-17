@@ -49,6 +49,8 @@ add_executable(SuperCOM
     src/themechkbox.cpp
     src/titlebar.h
     src/titlebar.cpp
+    src/oscilloscope.h
+    src/oscilloscope.cpp
     src/updater.h
     src/updater.cpp
     src/serialtool.h

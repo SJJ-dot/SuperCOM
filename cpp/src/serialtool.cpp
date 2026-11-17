@@ -161,6 +161,10 @@ void SerialTool::installResizeFilter() {
 int SerialTool::detectResizeEdge(const QPoint& pos) const {
     if (isMaximized())
         return 0;
+    // 只有落在本窗口内的点才算边框：否则窗口外的坐标（如示波器浮窗上的点击，
+    // mapFromGlobal 映射过来会远大于宽高）会被误判成右边/下边框。
+    if (!rect().contains(pos))
+        return 0;
     const int m = m_resizeMargin;
     const int w = width(), h = height();
     int edges = 0;
@@ -274,6 +278,11 @@ bool SerialTool::eventFilter(QObject* obj, QEvent* event) {
 
     if (t == QEvent::MouseMove || t == QEvent::MouseButtonPress
         || t == QEvent::MouseButtonRelease) {
+        // 只处理属于主窗口的鼠标事件：示波器等独立顶层窗口里的点击/移动不能被
+        // 主窗口的边缘缩放逻辑吞掉（否则按钮点了没反应）。
+        auto* src = qobject_cast<QWidget*>(obj);
+        if (!src || src->window() != this)
+            return false;
         auto* me = static_cast<QMouseEvent*>(event);
         const QPoint gpos = me->globalPosition().toPoint();
         const QPoint pos = mapFromGlobal(gpos);
@@ -329,6 +338,57 @@ void SerialTool::showEvent(QShowEvent* e) {
     QWidget::showEvent(e);
     // 窗口首次显示后启用 DWM 系统阴影 + 圆角
     enableDwmEffects();
+#ifdef Q_OS_WIN
+    // TODO(临时调试): SUPERCOM_OSCTEST=1 验证示波器提取规则与外观
+    static bool dbgOnce = false;
+    if (!dbgOnce && qEnvironmentVariableIsSet("SUPERCOM_OSCTEST")) {
+        dbgOnce = true;
+        QTimer::singleShot(600, this, [this] {
+            QJsonArray arr;
+            auto mk = [](const QString& p, const QString& s, bool e) {
+                QJsonObject o;
+                o[QStringLiteral("pattern")] = p;
+                o[QStringLiteral("scale")] = s;
+                o[QStringLiteral("enabled")] = e;
+                return o;
+            };
+            arr.append(mk(QStringLiteral("xpp=(\\d+)"), QStringLiteral("1"), true));
+            arr.append(mk(QStringLiteral("fs=(\\d+)"), QStringLiteral("/2"), true));
+            arr.append(mk(QStringLiteral("never=(\\d+)"), QStringLiteral("1"), true));
+            arr.append(mk(QStringLiteral("xpp=(\\d+)"), QStringLiteral("1"), false));
+            m_oscillo->fromJson(arr);
+            m_oscillo->clearData();
+            m_oscillo->feed(QStringLiteral(
+                "xpp=1274 xpp=9999 fs=488\n"
+                "no numbers here\n"
+                "xpp=1300 fs=500\r\n"
+                "fs=600\n"));
+            QString log;
+            for (int i = 0; i < 4; ++i) {
+                QStringList vs;
+                for (double v : m_oscillo->samples(i))
+                    vs << QString::number(v);
+                log += QStringLiteral("series%1: [%2]\n").arg(i).arg(vs.join(QStringLiteral(", ")));
+            }
+            log += QStringLiteral("json=")
+                   + QString::fromUtf8(QJsonDocument(m_oscillo->toJson()).toJson(QJsonDocument::Compact))
+                   + QLatin1Char('\n');
+            QFile f(QStringLiteral("d:/dev/python/sscom/cpp/test_ui/osc.txt"));
+            f.open(QIODevice::WriteOnly);
+            f.write(log.toUtf8());
+
+            m_oscillo->resize(760, 520);
+            m_oscillo->show();
+            QTimer::singleShot(250, this, [this] {
+                m_oscillo->grab().save(
+                    QStringLiteral("d:/dev/python/sscom/cpp/test_ui/osc.png"));
+                m_titleBar->grab().save(
+                    QStringLiteral("d:/dev/python/sscom/cpp/test_ui/title.png"));
+                qApp->quit();
+            });
+        });
+    }
+#endif
 }
 
 void SerialTool::paintEvent(QPaintEvent*) {
@@ -344,6 +404,11 @@ void SerialTool::closeEvent(QCloseEvent* e) {
         m_settingsWin->close();
         m_settingsWin->deleteLater();
         m_settingsWin = nullptr;
+    }
+    if (m_oscillo) {
+        m_oscillo->close();
+        m_oscillo->deleteLater();
+        m_oscillo = nullptr;
     }
     if (m_downloadThread && m_downloadThread->isRunning()) {
         m_downloadThread->cancel();
@@ -379,6 +444,10 @@ void SerialTool::buildUi() {
     outer->addWidget(m_titleBar);
     connect(m_titleBar, &TitleBar::versionClicked, this, &SerialTool::checkUpdateManual);
     connect(m_titleBar, &TitleBar::themeClicked, this, &SerialTool::toggleTheme);
+    connect(m_titleBar, &TitleBar::oscilloClicked, this, &SerialTool::toggleOscilloscope);
+    // 示波器独立浮窗（带系统标题栏），主窗口销毁时一并销毁
+    m_oscillo = new Oscilloscope(this);
+    m_oscillo->setWindowFlag(Qt::Window, true);
 
     // 内容容器
     auto* content = new QWidget(this);
@@ -921,6 +990,8 @@ void SerialTool::applyTheme(const QString& themeName) {
     if (QApplication* app = qApp)
         app->setStyleSheet(sjj::buildQss(m_themeC));
     m_titleBar->applyTheme(m_themeC, m_theme);
+    if (m_oscillo)
+        m_oscillo->setThemeColors(m_themeC);
     m_lblCsResult->setStyleSheet(
         QStringLiteral("color:%1;font-weight:bold;")
             .arg(m_themeC.value(QStringLiteral("err_color"))));
@@ -1763,6 +1834,13 @@ void SerialTool::addRecord(const QString& kind, const QString& raw) {
 
 void SerialTool::appendToView(QVector<Record>& recs) {
     ScrollGuard guard(m_programScroll);
+    // 示波器：从本次到达的接收文本提取数字（不受 HEX 显示/搜索筛选影响）
+    if (m_oscillo) {
+        for (const Record& r : recs) {
+            if (r.kind == QStringLiteral("rx"))
+                m_oscillo->feed(decodeBytesByCurrent(r.rawBytes));
+        }
+    }
     // 暂停语义 = 不自动滚动：数据照常写入视图，滚动位置锁定不动。
     // 用户手动向下滚动即可看到新数据；滚到最底部时 onRecvScroll 自动解除暂停。
     // （裁剪删顶行引发的 range 收缩/clamp 由 onRecvScroll 的 range 检测过滤，不会误改暂停）
@@ -3222,6 +3300,18 @@ void SerialTool::toggleWindow(int tabIndex) {
     }
 }
 
+void SerialTool::toggleOscilloscope() {
+    if (!m_oscillo)
+        return;
+    if (m_oscillo->isVisible()) {
+        m_oscillo->hide();
+        return;
+    }
+    m_oscillo->show();
+    m_oscillo->raise();
+    m_oscillo->activateWindow();
+}
+
 // ================= GitHub =================
 
 void SerialTool::openGithub() {
@@ -3280,6 +3370,7 @@ void SerialTool::saveParams(bool silent) {
     o[QStringLiteral("add_crlf")] = m_chkAddCrlf->isChecked();
     o[QStringLiteral("interval_ms")] = m_entryInterval->text();
     o[QStringLiteral("show_ts")] = m_chkShowTs->isChecked();
+    o[QStringLiteral("oscillo")] = m_oscillo ? m_oscillo->toJson() : QJsonArray();
     o[QStringLiteral("ms_groups")] = msGroupsToData();
     o[QStringLiteral("send_history")] = QJsonArray::fromStringList(m_sendHistory);
     // 搜索历史：带时间戳，按时间倒序
@@ -3375,6 +3466,9 @@ void SerialTool::loadParamsInner(bool silent) {
     m_chkAddCrlf->setChecked(o.value(QStringLiteral("add_crlf")).toBool(false));
     m_entryInterval->setText(o.value(QStringLiteral("interval_ms")).toString(QStringLiteral("1000")));
     m_chkShowTs->setChecked(o.value(QStringLiteral("show_ts")).toBool(true));
+    // 示波器表达式（自动保存，切换主题/重启后保留）
+    if (m_oscillo)
+        m_oscillo->fromJson(o.value(QStringLiteral("oscillo")).toArray());
     // 端口匹配
     const QString target = o.value(QStringLiteral("port")).toString();
     for (auto it = m_portMap.cbegin(); it != m_portMap.cend(); ++it) {
