@@ -5,6 +5,7 @@
 #include <QCoreApplication>
 #include <QtPlugin>
 
+#include "selfupdate.h"
 #include "serialtool.h"
 
 // ===== 静态链接 Qt 时显式导入插件（由 CMake 定义 SUPERCOM_STATIC_BUILD） =====
@@ -14,6 +15,9 @@ Q_IMPORT_PLUGIN(QModernWindowsStylePlugin)      // Windows 原生样式
 #endif
 
 int main(int argc, char** argv) {
+    // 自更新模式（--self-update <pid>）：不创建界面，替换完文件就退出
+    if (selfupdate::runIfRequested(argc, argv))
+        return 0;
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("SuperCOM"));
     // 关闭下拉框弹出动画：QComboBox 在 SH_ComboBox_Popup=0 时会用 qScrollEffect

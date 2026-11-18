@@ -53,6 +53,8 @@ add_executable(SuperCOM
     src/oscilloscope.cpp
     src/updater.h
     src/updater.cpp
+    src/selfupdate.h
+    src/selfupdate.cpp
     src/serialtool.h
     src/serialtool.cpp
 )
@@ -110,6 +112,7 @@ endif()
 
 if(WIN32)
     # Qt6::Core 会根据 WIN32_EXECUTABLE 属性自动链接 Qt6::EntryPointPrivate
-    target_link_libraries(SuperCOM PRIVATE dwmapi)
+    # shell32：自更新时用 ShellExecuteEx("runas") 提权重跑
+    target_link_libraries(SuperCOM PRIVATE dwmapi shell32)
     set_target_properties(SuperCOM PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()

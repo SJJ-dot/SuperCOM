@@ -1241,47 +1241,20 @@ void SerialTool::performUpdateRestart() {
     }
     const QString exeDir = QCoreApplication::applicationDirPath();
     const QString target = exeDir + QStringLiteral("/SuperCOM.exe");
-    const QString bat = exeDir + QStringLiteral("/_supercom_update.bat");
-    // cmd/start 对正斜杠路径兼容性差（explorer.exe 传正斜杠会失败），统一转反斜杠
-    const QString tmp = QDir::toNativeSeparators(m_updateTmp);
-    const QString tgt = QDir::toNativeSeparators(target);
-    // bat 用 UTF-8 with BOM 写入，cmd 需 chcp 65001 切到 UTF-8 代码页
-    // （默认 GBK 代码页会导致含中文的 exe 路径乱码，move 找不到文件）
-    // 启动新 exe 用 cmd 内建 start（explorer.exe 启动 exe 行为不可靠，实测会失败）
-    const QString script = QStringLiteral(
-        "@echo off\r\n"
-        "chcp 65001 >nul\r\n"
-        ":wait\r\n"
-        "tasklist /fi \"imagename eq SuperCOM.exe\" 2>nul "
-        "| find /i \"SuperCOM.exe\" >nul\r\n"
-        "if errorlevel 1 goto replace\r\n"
-        "timeout /t 1 /nobreak >nul\r\n"
-        "goto wait\r\n"
-        ":replace\r\n"
-        "move /y \"%1\" \"%2\" >nul 2>&1\r\n"
-        "start \"\" \"%2\"\r\n"
-        "del \"%~f0\"\r\n")
-        // QString::arg 没有多参重载——必须链式调用
-        .arg(tmp).arg(tgt);
-    QFile f(bat);
-    if (!f.open(QIODevice::WriteOnly)) {
-        QMessageBox::critical(this, QStringLiteral("更新失败"),
-                              QStringLiteral("无法写入更新脚本：%1").arg(f.errorString()));
-        return;
-    }
-    f.write("\xEF\xBB\xBF");
-    f.write(script.toUtf8());
-    f.close();
-    // CREATE_NO_WINDOW 静默启动批处理，不弹黑窗
-    if (!QProcess::startDetached(QStringLiteral("cmd"), {QStringLiteral("/c"), bat})) {
+    // 新版本 exe 自己当更新器：--self-update <旧进程pid>
+    // 它会等本进程退出 → 复制自身覆盖 SuperCOM.exe → 拉起新版本 → 自己退出
+    const QStringList args{QStringLiteral("--self-update"),
+                           QString::number(QCoreApplication::applicationPid())};
+    if (!QProcess::startDetached(m_updateTmp, args, exeDir)) {
         QMessageBox::critical(this, QStringLiteral("更新失败"),
                               QStringLiteral("无法启动更新程序。\n新版本已下载到：%1\n请手动替换 %2")
                                   .arg(m_updateTmp).arg(target));
         return;
     }
     m_btnRestart->hide();
-    m_lblStatus->setText(QStringLiteral("更新完成，正在重启..."));
-    QTimer::singleShot(800, this, &SerialTool::close);
+    m_lblStatus->setText(QStringLiteral("正在更新，程序将自动重启..."));
+    // 尽快退出，让更新器不用等太久（更新器最长等 30 秒）
+    QTimer::singleShot(300, this, &SerialTool::close);
 }
 
 // ================= 端口 / 串口 =================
