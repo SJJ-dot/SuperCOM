@@ -8,4 +8,7 @@ namespace selfupdate {
 // 返回 false 表示普通启动。
 bool runIfRequested(int argc, char** argv);
 
+// 普通启动时调用：若上次更新成功（存在成功标记），删掉更新器 exe、日志等残留文件。
+void cleanupAfterUpdate();
+
 }   // namespace selfupdate

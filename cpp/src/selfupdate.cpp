@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 
 #ifdef Q_OS_WIN
 #ifndef WIN32_LEAN_AND_MEAN
@@ -261,8 +262,14 @@ bool runIfRequested(int argc, char** argv) {
     }
     logLine(QStringLiteral("替换完成并校验通过：%1").arg(target));
 
-    // 6) 清理备份 → 拉起新版本
+    // 6) 清理备份 → 留成功标记 → 拉起新版本
     DeleteFileW(wide(backup).c_str());
+    // 成功标记：新版本启动后据此删除更新器自身与日志等残留文件
+    QFile mark(dir + QStringLiteral("/.supercom_update_ok"));
+    if (mark.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        mark.write("1");
+        mark.close();
+    }
     if (!launchExe(target, dir)) {
         showFailure(QStringLiteral("新版本已就位，但启动失败，请手动运行 %1").arg(target));
         return true;
@@ -273,6 +280,38 @@ bool runIfRequested(int argc, char** argv) {
     MoveFileExW(wide(self).c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
     return true;
 #endif
+}
+
+// 更新成功后由新版本在启动时调用：删除更新器自身、暂存文件、备份与日志。
+// 只有看到成功标记才清理，失败时保留日志便于排查。
+// 新版本可能先于更新器进程退出而启动，删不掉时稍后重试几次。
+void cleanupAfterUpdate() {
+    static int tries = 0;
+    const QString dir = QCoreApplication::applicationDirPath();
+    const QString mark = dir + QStringLiteral("/.supercom_update_ok");
+    if (!QFileInfo::exists(mark))
+        return;
+    const QStringList leftovers{
+        dir + QStringLiteral("/SuperCOM.update.exe"),   // 下载的新版本（已复制走）
+        dir + QStringLiteral("/SuperCOM.pending.exe"),  // 替换中间文件
+        dir + QStringLiteral("/SuperCOM.exe.bak"),      // 旧版本备份
+        dir + QStringLiteral("/SuperCOM_update.log"),   // 更新日志
+    };
+    bool allGone = true;
+    for (const QString& f : leftovers) {
+        if (!QFileInfo::exists(f))
+            continue;
+        QFile::remove(f);
+        if (QFileInfo::exists(f))   // 更新器还没退出时会占用，稍后重试
+            allGone = false;
+    }
+    if (allGone) {
+        QFile::remove(mark);
+        tries = 0;
+        return;
+    }
+    if (tries++ < 5)
+        QTimer::singleShot(500, [] { cleanupAfterUpdate(); });
 }
 
 }   // namespace selfupdate

@@ -20,6 +20,8 @@ int main(int argc, char** argv) {
         return 0;
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("SuperCOM"));
+    // 上次更新成功时清掉更新器 exe、日志等残留文件
+    selfupdate::cleanupAfterUpdate();
     // 关闭下拉框弹出动画：QComboBox 在 SH_ComboBox_Popup=0 时会用 qScrollEffect
     // 播放"向下滚动展开"动画，与自定义弹窗定位叠加会出现"先向下展开再换向"的观感。
     QApplication::setEffectEnabled(Qt::UI_AnimateCombo, false);
