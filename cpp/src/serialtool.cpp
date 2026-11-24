@@ -2728,8 +2728,8 @@ void SerialTool::refreshMsRows() {
         head->setSpacing(2);
         head->addWidget(makeHeadLabel(QStringLiteral("HEX"), kChkW));   // 勾选框列标题
         head->addWidget(makeHeadLabel(QStringLiteral("命令内容"), 0), 1);
-        head->addWidget(makeHeadLabel(QStringLiteral("校验"), kCsW));
         head->addWidget(makeHeadLabel(QStringLiteral("发送"), kSendW));
+        head->addWidget(makeHeadLabel(QStringLiteral("校验"), kCsW));
         if (m_msManageMode)
             head->addWidget(makeHeadLabel(QStringLiteral("删除"), kDelW));
         rows->addLayout(head);
@@ -2798,8 +2798,6 @@ void SerialTool::refreshMsRows() {
                 if (g >= 0)
                     editMsEntryChecksum(g, ei);
             });
-            row->addWidget(csBtn);
-
             auto* btn = new QPushButton(me.label, page);
             btn->setFixedWidth(kSendW);
             btn->setToolTip(QStringLiteral("左键发送；右键可修改按钮文字"));
@@ -2820,6 +2818,7 @@ void SerialTool::refreshMsRows() {
                             renameMsEntry(g, ei);
                     });
             row->addWidget(btn);
+            row->addWidget(csBtn);   // 列顺序：发送 → 校验（与表头一致）
 
             if (m_msManageMode) {
                 auto* xbtn = new QPushButton(QStringLiteral("\u2715"), page);
