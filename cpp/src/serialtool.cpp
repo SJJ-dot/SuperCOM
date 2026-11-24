@@ -2458,6 +2458,25 @@ QPair<QByteArray, QByteArray> SerialTool::applyChecksum(const QByteArray& data) 
     return {data + cs, cs};
 }
 
+QPair<QByteArray, QByteArray> SerialTool::applyChecksumFor(const QByteArray& data,
+                                                           const QString& algorithm,
+                                                           int start, int endOff) const {
+    // 不更新界面预览：供快捷命令（每条独立校验配置）使用
+    if (data.isEmpty() || algorithm.isEmpty() || algorithm == QStringLiteral("None"))
+        return {data, {}};
+    if (start < 1)
+        start = 1;
+    if (endOff > 0)
+        endOff = 0;
+    const QByteArray head = sjj::checksumRange(data, start, endOff);
+    if (head.isEmpty())
+        return {data, {}};
+    const QByteArray cs = sjj::computeChecksum(head, algorithm);
+    if (cs.isEmpty())
+        return {data, {}};
+    return {data + cs, cs};
+}
+
 void SerialTool::updateCsPreview() {
     // 防抖 100ms 后根据发送框内容实时预览校验结果
     if (m_csPreviewTimer)
@@ -2621,7 +2640,7 @@ void SerialTool::refreshMsRows() {
         MsGroup& grp = m_msGroups[g];
         auto* page = new QWidget(m_msTabs);
         auto* lay = new QVBoxLayout(page);
-        lay->setContentsMargins(4, 4, 4, 4);
+        lay->setContentsMargins(2, 3, 2, 2);
         lay->setSpacing(4);
 
         // 分组下标不能按构建时的 g 捕获：拖动选项卡排序后页面控件会跟着移动，但捕获
@@ -2667,38 +2686,123 @@ void SerialTool::refreshMsRows() {
                 deleteMsGroup(g);
         });
         header->addWidget(delGrp);
+        // 管理模式：开启后每条命令右侧才显示删除按钮（避免误删）
+        auto* manageBtn = new QPushButton(QStringLiteral("管理"), page);
+        manageBtn->setFixedWidth(52);
+        manageBtn->setCheckable(true);
+        manageBtn->setChecked(m_msManageMode);
+        manageBtn->setToolTip(QStringLiteral("管理模式：显示每条命令的删除按钮"));
+        connect(manageBtn, &QPushButton::toggled, this, &SerialTool::setMsManageMode);
+        header->addWidget(manageBtn);
         lay->addLayout(header);
 
         // ---- 组内命令 ----
+        // 列宽：HEX 勾选框(仅表头显示文字) / 内容(自适应) / 校验设置 / 发送 / 删除(仅管理模式)
+        const int kChkW = 26;
+        const int kCsW = 74;
+        const int kSendW = 96;
+        const int kDelW = 26;
+        const QString subColor = m_themeC.value(QStringLiteral("text_secondary"));
+        auto makeHeadLabel = [page, &subColor](const QString& text, int w) {
+            auto* l = new QLabel(text, page);
+            l->setStyleSheet(QStringLiteral("color:%1;").arg(subColor));
+            QFont hf = l->font();   // 表头比正文小一号，省出宽度给命令内容
+            hf.setPointSizeF(qMax(7.0, hf.pointSizeF() - 1.0));
+            l->setFont(hf);
+            if (w > 0) {
+                l->setFixedWidth(w);
+                l->setAlignment(Qt::AlignCenter);
+            }
+            return l;
+        };
         auto* scroll = new QScrollArea(page);
         scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);   // 去掉滚动区边框，减小左侧空隙
         auto* inner = new QWidget;
         auto* rows = new QVBoxLayout(inner);
-        rows->setContentsMargins(2, 2, 2, 2);
+        rows->setContentsMargins(1, 2, 2, 2);
         rows->setSpacing(2);
-        rows->addStretch(1);
+
+        // ---- 表头 ----
+        auto* head = new QHBoxLayout;
+        head->setSpacing(2);
+        head->addWidget(makeHeadLabel(QStringLiteral("HEX"), kChkW));   // 勾选框列标题
+        head->addWidget(makeHeadLabel(QStringLiteral("命令内容"), 0), 1);
+        head->addWidget(makeHeadLabel(QStringLiteral("校验"), kCsW));
+        head->addWidget(makeHeadLabel(QStringLiteral("发送"), kSendW));
+        if (m_msManageMode)
+            head->addWidget(makeHeadLabel(QStringLiteral("删除"), kDelW));
+        rows->addLayout(head);
+
         for (int i = 0; i < grp.entries.size(); ++i) {
             const int ei = i;
+            const MsEntry& me = grp.entries[i];
             auto* row = new QHBoxLayout;
             row->setSpacing(2);
-            auto* chk = new ThemeCheckBox(QStringLiteral("HEX"), page);
+            // HEX 勾选框保留（只去掉文字标记，文字在表头显示）
+            auto* chkWrap = new QWidget(page);
+            chkWrap->setFixedWidth(kChkW);
+            auto* chkLay = new QHBoxLayout(chkWrap);
+            chkLay->setContentsMargins(0, 0, 0, 0);
+            auto* chk = new ThemeCheckBox(QString(), chkWrap);
             chk->setThemeColors(m_themeC);
-            chk->setChecked(grp.entries[i].hex);
+            chk->setChecked(me.hex);
+            chk->setToolTip(QStringLiteral("十六进制发送"));
+            chk->setFocusPolicy(Qt::NoFocus);
             connect(chk, &QCheckBox::toggled, this, [this, groupIndex, ei](bool v) {
                 const int g = groupIndex();
                 if (g >= 0)
                     msSetHex(g, ei, v);
             });
-            row->addWidget(chk);
-            auto* ent = new QLineEdit(grp.entries[i].content);
+            chkLay->addWidget(chk, 0, Qt::AlignCenter);
+            row->addWidget(chkWrap);
+            auto* ent = new QLineEdit(me.content, page);
+            ent->setPlaceholderText(QStringLiteral("命令内容"));
+            ent->setToolTip(QStringLiteral("勾选左侧复选框按十六进制解析，不勾选按文本发送"));
             connect(ent, &QLineEdit::textChanged, this, [this, groupIndex, ei](const QString& t) {
                 const int g = groupIndex();
                 if (g >= 0)
                     msSetContent(g, ei, t);
             });
             row->addWidget(ent, 1);
-            auto* btn = new QPushButton(grp.entries[i].label);
-            btn->setFixedWidth(96);
+
+            // 每条命令独立的校验设置：默认 None
+            const QString csName = me.cs.isEmpty() ? QStringLiteral("None") : me.cs;
+            // 窄列显示用短名（tooltip 里给全名），避免文字被裁切
+            QString csShow = csName;
+            if (csName == QStringLiteral("ModbusCRC16"))
+                csShow = QStringLiteral("Modbus16");
+            else if (csName == QStringLiteral("CCITT-CRC16"))
+                csShow = QStringLiteral("CCITT16");
+            auto* csBtn = new QPushButton(csShow, page);
+            csBtn->setFixedWidth(kCsW);
+            // 校验名较长：字号小一号 + 压缩内边距，保证窄列内完整显示
+            QFont cf = csBtn->font();
+            cf.setPointSizeF(qMax(6.5, cf.pointSizeF() - 1.5));
+            csBtn->setFont(cf);
+            csBtn->setStyleSheet(QStringLiteral("QPushButton{padding:0 2px;}"));
+            // 字号变小会让按钮自然变矮：垂直方向跟随行高，与内容框/发送按钮同高
+            csBtn->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+            csBtn->setMinimumHeight(ent->sizeHint().height());
+            if (csName == QStringLiteral("None")) {
+                csBtn->setToolTip(QStringLiteral("点击设置校验（当前不加校验）"));
+            } else {
+                const QString endText = me.csEnd >= 0
+                    ? QStringLiteral("末尾")
+                    : QStringLiteral("倒数第 %1 字节").arg(-me.csEnd);
+                csBtn->setToolTip(QStringLiteral("校验: %1\n范围: 第 %2 字节 至 %3\n点击修改")
+                                      .arg(csName).arg(me.csStart).arg(endText));
+            }
+            connect(csBtn, &QPushButton::clicked, this, [this, groupIndex, ei] {
+                const int g = groupIndex();
+                if (g >= 0)
+                    editMsEntryChecksum(g, ei);
+            });
+            row->addWidget(csBtn);
+
+            auto* btn = new QPushButton(me.label, page);
+            btn->setFixedWidth(kSendW);
+            btn->setToolTip(QStringLiteral("左键发送；右键可修改按钮文字"));
             connect(btn, &QPushButton::clicked, this, [this, groupIndex, ei] {
                 const int g = groupIndex();
                 if (g >= 0)
@@ -2706,22 +2810,31 @@ void SerialTool::refreshMsRows() {
             });
             btn->setContextMenuPolicy(Qt::CustomContextMenu);
             connect(btn, &QWidget::customContextMenuRequested, this,
-                    [this, groupIndex, ei](const QPoint&) {
+                    [this, groupIndex, ei, btn](const QPoint& pos) {
                         const int g = groupIndex();
-                        if (g >= 0)
+                        if (g < 0 || g >= m_msGroups.size() || ei >= m_msGroups[g].entries.size())
+                            return;
+                        QMenu menu(this);
+                        QAction* actRename = menu.addAction(QStringLiteral("重命名按钮文字"));
+                        if (menu.exec(btn->mapToGlobal(pos)) == actRename)
                             renameMsEntry(g, ei);
                     });
             row->addWidget(btn);
-            auto* xbtn = new QPushButton(QStringLiteral("\u2715"), page);
-            xbtn->setFixedWidth(28);
-            connect(xbtn, &QPushButton::clicked, this, [this, groupIndex, ei] {
-                const int g = groupIndex();
-                if (g >= 0)
-                    deleteMsEntry(g, ei);
-            });
-            row->addWidget(xbtn);
-            rows->insertLayout(rows->count() - 1, row);
+
+            if (m_msManageMode) {
+                auto* xbtn = new QPushButton(QStringLiteral("\u2715"), page);
+                xbtn->setFixedWidth(kDelW);
+                xbtn->setToolTip(QStringLiteral("删除该命令"));
+                connect(xbtn, &QPushButton::clicked, this, [this, groupIndex, ei] {
+                    const int g = groupIndex();
+                    if (g >= 0)
+                        deleteMsEntry(g, ei);
+                });
+                row->addWidget(xbtn);
+            }
+            rows->addLayout(row);
         }
+        rows->addStretch(1);   // 命令行不足一屏时置顶排列
         scroll->setWidget(inner);
         lay->addWidget(scroll, 1);
 
@@ -2964,6 +3077,11 @@ QVector<MsGroup> SerialTool::msGroupsFromArray(const QJsonArray& arr) const {
             me.label = eo.value(QStringLiteral("label")).toString(QStringLiteral("发送"));
             if (me.label.isEmpty())
                 me.label = QStringLiteral("发送");
+            // 校验配置（旧配置无这些字段 → 默认 None / 1 / 0）
+            const QString cs = eo.value(QStringLiteral("cs")).toString(QStringLiteral("None"));
+            me.cs = sjj::CHECKSUMS.contains(cs) ? cs : QStringLiteral("None");
+            me.csStart = qMax(1, eo.value(QStringLiteral("cs_start")).toInt(1));
+            me.csEnd = qMin(0, eo.value(QStringLiteral("cs_end")).toInt(0));
             grp.entries.append(me);
         }
         groups.append(grp);
@@ -2994,6 +3112,94 @@ void SerialTool::renameMsEntry(int g, int i) {
     }
 }
 
+void SerialTool::editMsEntryChecksum(int g, int i) {
+    if (g < 0 || g >= m_msGroups.size() || i < 0 || i >= m_msGroups[g].entries.size())
+        return;
+    // 不长期持有条目引用：弹窗期间其他实例可能改写配置导致 m_msGroups 重建
+    const QString curCs = m_msGroups[g].entries[i].cs;
+    const int curStart = m_msGroups[g].entries[i].csStart;
+    const int curEnd = m_msGroups[g].entries[i].csEnd;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("校验设置"));
+    auto* root = new QVBoxLayout(&dlg);
+    root->setContentsMargins(12, 12, 12, 10);
+    root->setSpacing(8);
+
+    auto* form = new QFormLayout;
+    form->setSpacing(8);
+    auto* cmb = new StyledComboBox(&dlg);
+    cmb->addItems(sjj::CHECKSUMS);
+    cmb->setEditable(false);
+    cmb->setCurrentText(curCs.isEmpty() ? QStringLiteral("None") : curCs);
+    form->addRow(QStringLiteral("算法"), cmb);
+
+    auto* entStart = new QLineEdit(QString::number(qMax(1, curStart)), &dlg);
+    entStart->setFixedWidth(64);
+    entStart->setAlignment(Qt::AlignCenter);
+    form->addRow(QStringLiteral("起始字节"), entStart);
+
+    auto* entEnd = new QLineEdit(QString::number(qMin(0, curEnd)), &dlg);
+    entEnd->setFixedWidth(64);
+    entEnd->setAlignment(Qt::AlignCenter);
+    form->addRow(QStringLiteral("末尾偏移"), entEnd);
+
+    auto* tip = new QLabel(
+        QStringLiteral("起始字节从 1 开始计数；末尾偏移 0 表示计算到数据末尾，"
+                       "填 2 表示计算到倒数第 2 字节。"),
+        &dlg);
+    tip->setWordWrap(true);
+    root->addLayout(form);
+    root->addWidget(tip);
+
+    auto* btns = new QHBoxLayout;
+    btns->addStretch(1);
+    auto* btnCancel = new QPushButton(QStringLiteral("取消"), &dlg);
+    auto* btnOk = new QPushButton(QStringLiteral("确定"), &dlg);
+    btnOk->setDefault(true);
+    btns->addWidget(btnCancel);
+    btns->addWidget(btnOk);
+    root->addLayout(btns);
+    connect(btnCancel, &QPushButton::clicked, &dlg, &QDialog::reject);
+    connect(btnOk, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+    // 算法为 None 时范围输入无意义，置灰
+    auto syncEnabled = [cmb, entStart, entEnd] {
+        const bool on = cmb->currentText() != QStringLiteral("None");
+        entStart->setEnabled(on);
+        entEnd->setEnabled(on);
+    };
+    connect(cmb, &QComboBox::currentTextChanged, &dlg, [syncEnabled](const QString&) {
+        syncEnabled();
+    });
+    syncEnabled();
+
+    dlg.resize(320, dlg.sizeHint().height());
+    if (dlg.exec() != QDialog::Accepted)
+        return;
+
+    // 弹窗期间配置可能被其他实例改写：重新校验下标再写回
+    if (g < 0 || g >= m_msGroups.size() || i < 0 || i >= m_msGroups[g].entries.size())
+        return;
+    bool okStart = false;
+    bool okEnd = false;
+    const int st = entStart->text().toInt(&okStart);
+    const int en = entEnd->text().toInt(&okEnd);
+    MsEntry& e = m_msGroups[g].entries[i];
+    e.cs = cmb->currentText();
+    e.csStart = okStart ? qMax(1, st) : 1;
+    e.csEnd = okEnd ? qMin(0, en) : 0;
+    refreshMsRows();
+    saveParams(true);   // 同步到其他实例
+}
+
+void SerialTool::setMsManageMode(bool on) {
+    if (m_msManageMode == on)
+        return;
+    m_msManageMode = on;
+    refreshMsRows();
+}
+
 void SerialTool::sendMsEntry(int g, int i) {
     if (!m_ser || !m_ser->isOpen()) {
         QMessageBox::warning(this, QStringLiteral("提示"), QStringLiteral("请先打开串口"));
@@ -3020,10 +3226,10 @@ void SerialTool::sendMsEntry(int g, int i) {
     } else {
         data = sjj::encodeString(raw, QStringLiteral("UTF-8"));
     }
-    // 先加回车换行，再算校验码（CRLF 参与校验计算，作为帧的一部分）
-    if (m_chkAddCrlf->isChecked())
-        data += "\r\n";
-    const auto [out, cs] = applyChecksum(data);
+    // 快捷命令完全独立：不追加换行（需要换行请直接写进命令内容），
+    // 也不看发送区的「加回车换行」
+    // 校验用本条命令自己的配置（默认 None = 不追加）
+    const auto [out, cs] = applyChecksumFor(data, e.cs, e.csStart, e.csEnd);
     const qint64 n = m_ser->write(out);
     if (n < 0) {
         QMessageBox::critical(this, QStringLiteral("发送失败"), m_ser->errorString());
@@ -3315,6 +3521,10 @@ QJsonArray SerialTool::msGroupsToData() const {
             eo[QStringLiteral("hex")] = e.hex;
             eo[QStringLiteral("content")] = e.content;
             eo[QStringLiteral("label")] = e.label;
+            // 每条命令独立的校验配置
+            eo[QStringLiteral("cs")] = e.cs;
+            eo[QStringLiteral("cs_start")] = e.csStart;
+            eo[QStringLiteral("cs_end")] = e.csEnd;
             ea.append(eo);
         }
         go[QStringLiteral("entries")] = ea;

@@ -59,6 +59,10 @@ struct MsEntry {
     bool hex = false;
     QString content;
     QString label;
+    // 每条命令独立校验配置（默认 None = 不追加校验）
+    QString cs = QStringLiteral("None");
+    int csStart = 1;    // 起始字节（1 起）
+    int csEnd = 0;      // 末尾偏移（<=0，0 表示到数据末尾）
 };
 
 // 搜索历史条目（带时间戳，按时间倒序）
@@ -170,6 +174,9 @@ private:
     QByteArray checksumRangeFor(const QByteArray& data) const;
     void updateChecksumHighlight();
     QPair<QByteArray, QByteArray> applyChecksum(const QByteArray& data);
+    // 按指定算法/范围追加校验（不触碰界面上的校验预览标签）
+    QPair<QByteArray, QByteArray> applyChecksumFor(const QByteArray& data, const QString& algorithm,
+                                                   int start, int endOff) const;
     void updateCsPreview();
     void doCsPreview();
 
@@ -196,6 +203,8 @@ private:
     void newMsGroup();                   // 新建分组
     void deleteMsEntry(int g, int i);
     void renameMsEntry(int g, int i);
+    void editMsEntryChecksum(int g, int i);   // 弹出校验设置对话框（按条目独立配置）
+    void setMsManageMode(bool on);            // 管理模式：显示条目删除按钮
     void sendMsEntry(int g, int i);
     void deleteMsGroup(int g);
     void renameMsGroup(int g, const QString& name);
@@ -324,6 +333,7 @@ private:
     QStringList m_sendHistory;                        // 发送历史（去重、置顶、上限 50）
     QVector<MsGroup> m_msGroups;                      // 快捷命令分组
     int m_activeMsGroup = 0;                          // 当前活动分组（循环发送目标）
+    bool m_msManageMode = false;                      // 管理模式：条目显示删除按钮
     QHash<QString, QString> m_portMap;                // 显示 label → 设备名
     bool m_msLooping = false;
     int m_msLoopIndex = 0;                            // 循环发送在活动组内的下标
