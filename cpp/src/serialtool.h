@@ -208,6 +208,8 @@ private:
     void sendMsEntry(int g, int i);
     void deleteMsGroup(int g);
     void renameMsGroup(int g, const QString& name);
+    void importMsGroups();               // 导入快捷命令（支持整份配置文件；重复命令忽略）
+    void exportMsGroups();               // 导出快捷命令为 JSON（可直接用导入功能读回）
     void setActiveMsGroup(int g);        // 设定活动分组（循环发送目标 + 高亮）
     void applyMsActiveStyle();           // 重绘分组高亮边框
     void cycleMsTab(int dir);            // 选项卡按顺序切换（dir=-1前/1后）
@@ -334,6 +336,8 @@ private:
     QVector<MsGroup> m_msGroups;                      // 快捷命令分组
     int m_activeMsGroup = 0;                          // 当前活动分组（循环发送目标）
     bool m_msManageMode = false;                      // 管理模式：条目显示删除按钮
+    QString m_cmdExportDir;                           // 上次导出快捷命令的目录
+    QString m_cmdImportDir;                           // 上次导入快捷命令的目录
     QHash<QString, QString> m_portMap;                // 显示 label → 设备名
     bool m_msLooping = false;
     int m_msLoopIndex = 0;                            // 循环发送在活动组内的下标

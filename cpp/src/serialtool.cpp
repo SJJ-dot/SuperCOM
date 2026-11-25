@@ -681,6 +681,21 @@ void SerialTool::buildUi() {
     auto* btnNewGrp = new QPushButton(QStringLiteral("新建分组"), msTop);
     connect(btnNewGrp, &QPushButton::clicked, this, &SerialTool::newMsGroup);
     msTopLay->addWidget(btnNewGrp);
+    // 更多：快捷命令导入 / 导出（面板宽度有限，收进菜单）
+    auto* btnMsMore = new QPushButton(QStringLiteral("\u22EF"), msTop);
+    btnMsMore->setFixedWidth(28);
+    btnMsMore->setToolTip(QStringLiteral("导入 / 导出快捷命令"));
+    connect(btnMsMore, &QPushButton::clicked, this, [this, btnMsMore] {
+        QMenu menu(this);
+        QAction* actImport = menu.addAction(QStringLiteral("导入快捷命令…"));
+        QAction* actExport = menu.addAction(QStringLiteral("导出快捷命令…"));
+        QAction* chosen = menu.exec(btnMsMore->mapToGlobal(QPoint(0, btnMsMore->height())));
+        if (chosen == actImport)
+            importMsGroups();
+        else if (chosen == actExport)
+            exportMsGroups();
+    });
+    msTopLay->addWidget(btnMsMore);
     msPanelLay->addWidget(msTop);
 
     // 选项卡：每页=一个快捷命令分组（横向排列），支持手动拖动排序
@@ -2966,6 +2981,164 @@ void SerialTool::setActiveMsGroup(int g) {
     applyMsActiveStyle();
 }
 
+// ================= 快捷命令 导入 / 导出 =================
+
+void SerialTool::exportMsGroups() {
+    if (m_msGroups.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("导出快捷命令"),
+                                 QStringLiteral("当前没有快捷命令可导出"));
+        return;
+    }
+    const QString defName = QStringLiteral("SuperCom_cmds.json");
+    // 默认定位到上次导出的目录（没有则用上次导入的目录）
+    const QString startDir = !m_cmdExportDir.isEmpty() ? m_cmdExportDir : m_cmdImportDir;
+    const QString startPath = (startDir.isEmpty() || !QDir(startDir).exists())
+        ? defName
+        : QDir(startDir).filePath(defName);
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("导出快捷命令"), startPath,
+        QStringLiteral("JSON 文件 (*.json);;所有文件 (*.*)"));
+    if (path.isEmpty())
+        return;
+    // 记住导出目录，下次默认打开
+    m_cmdExportDir = QFileInfo(path).absolutePath();
+    saveParams(true);
+    // 结构与本程序配置文件一致（含 ms_groups），导出的文件也能当配置文件用
+    QJsonObject root;
+    root[QStringLiteral("app")] = QStringLiteral("SuperCOM");
+    root[QStringLiteral("type")] = QStringLiteral("ms_groups");
+    root[QStringLiteral("ms_groups")] = msGroupsToData();
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) {
+        QMessageBox::critical(this, QStringLiteral("导出失败"), f.errorString());
+        return;
+    }
+    f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    f.close();
+    int entries = 0;
+    for (const auto& g : m_msGroups)
+        entries += g.entries.size();
+    QMessageBox::information(
+        this, QStringLiteral("导出快捷命令"),
+        QStringLiteral("已导出 %1 个分组、%2 条命令：\n%3")
+            .arg(m_msGroups.size()).arg(entries).arg(path));
+}
+
+void SerialTool::importMsGroups() {
+    // 默认定位到上次导入的目录（没有则用上次导出的目录）
+    const QString startDir = !m_cmdImportDir.isEmpty() ? m_cmdImportDir : m_cmdExportDir;
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("导入快捷命令"),
+        (startDir.isEmpty() || !QDir(startDir).exists()) ? QString() : startDir,
+        QStringLiteral("JSON 文件 (*.json);;所有文件 (*.*)"));
+    if (path.isEmpty())
+        return;
+    // 记住导入目录，下次默认打开
+    m_cmdImportDir = QFileInfo(path).absolutePath();
+    saveParams(true);
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        QMessageBox::critical(this, QStringLiteral("导入失败"), f.errorString());
+        return;
+    }
+    const QByteArray bytes = f.readAll();
+    f.close();
+    QJsonParseError perr{};
+    const QJsonDocument doc = QJsonDocument::fromJson(bytes, &perr);
+    if (perr.error != QJsonParseError::NoError) {
+        QMessageBox::critical(this, QStringLiteral("导入失败"),
+                              QStringLiteral("JSON 解析错误：%1").arg(perr.errorString()));
+        return;
+    }
+    // 支持两种来源：本程序导出的文件 / 整份配置文件（取 ms_groups），或直接是分组数组
+    QJsonArray arr;
+    if (doc.isArray())
+        arr = doc.array();
+    else if (doc.isObject())
+        arr = doc.object().value(QStringLiteral("ms_groups")).toArray();
+    if (arr.isEmpty()) {
+        QMessageBox::warning(
+            this, QStringLiteral("导入快捷命令"),
+            QStringLiteral("文件里没有可导入的快捷命令。\n"
+                           "需要包含 ms_groups 字段（本程序配置文件即可），"
+                           "或直接是分组数组。"));
+        return;
+    }
+
+    const QVector<MsGroup> incoming = msGroupsFromArray(arr);
+    int addedGroups = 0;
+    int addedEntries = 0;
+    int skipped = 0;
+    auto isSameEntry = [](const MsEntry& a, const MsEntry& b) {
+        // 同一命令：HEX 模式与内容都相同即视为重复（按钮文字不同也算重复）
+        return a.hex == b.hex && a.content == b.content;
+    };
+    for (const MsGroup& in : incoming) {
+        // 同名分组 → 合并到已有分组，避免出现重复分组
+        int target = -1;
+        for (int g = 0; g < m_msGroups.size(); ++g) {
+            if (m_msGroups[g].name == in.name) {
+                target = g;
+                break;
+            }
+        }
+        if (target < 0) {
+            MsGroup ng;
+            ng.name = in.name;
+            ng.collapsed = in.collapsed;
+            for (const MsEntry& e : in.entries) {
+                bool dup = false;
+                for (const MsEntry& ex : ng.entries) {
+                    if (isSameEntry(ex, e)) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (dup) {
+                    ++skipped;
+                    continue;
+                }
+                ng.entries.append(e);
+            }
+            if (ng.entries.isEmpty())
+                continue;   // 空组/全重复：不建空分组
+            m_msGroups.append(ng);
+            ++addedGroups;
+            addedEntries += ng.entries.size();
+            continue;
+        }
+        for (const MsEntry& e : in.entries) {
+            bool dup = false;
+            for (const MsEntry& ex : m_msGroups[target].entries) {
+                if (isSameEntry(ex, e)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) {
+                ++skipped;
+                continue;
+            }
+            m_msGroups[target].entries.append(e);
+            ++addedEntries;
+        }
+    }
+
+    if (addedEntries == 0 && addedGroups == 0) {
+        QMessageBox::information(
+            this, QStringLiteral("导入快捷命令"),
+            QStringLiteral("没有新增命令：%1 条与现有命令相同，已忽略").arg(skipped));
+        return;
+    }
+    refreshMsRows();
+    saveParams(true);   // 同步到其他实例
+    QString msg = QStringLiteral("导入完成：新增 %1 个分组、%2 条命令")
+                      .arg(addedGroups).arg(addedEntries);
+    if (skipped > 0)
+        msg += QStringLiteral("，忽略重复 %1 条").arg(skipped);
+    QMessageBox::information(this, QStringLiteral("导入快捷命令"), msg);
+}
+
 void SerialTool::newMsGroup() {
     MsGroup g;
     g.name = QStringLiteral("分组%1").arg(m_msGroups.size() + 1);
@@ -3555,6 +3728,8 @@ void SerialTool::saveParams(bool silent) {
     o[QStringLiteral("oscillo")] = m_oscillo ? m_oscillo->toJson() : QJsonArray();
     o[QStringLiteral("osc_view")] = m_oscillo ? m_oscillo->viewToJson() : QJsonObject();
     o[QStringLiteral("ms_groups")] = msGroupsToData();
+    o[QStringLiteral("cmd_export_dir")] = m_cmdExportDir;   // 快捷命令导出目录
+    o[QStringLiteral("cmd_import_dir")] = m_cmdImportDir;   // 快捷命令导入目录
     o[QStringLiteral("send_history")] = QJsonArray::fromStringList(m_sendHistory);
     // 搜索历史：带时间戳，按时间倒序
     {
@@ -3665,6 +3840,8 @@ void SerialTool::loadParamsInner(bool silent) {
     // 多字符串面板（分组）：优先读 ms_groups；无则把旧 ms_entries / quick_cmds
     // 迁移进一个默认分组，保证老配置不丢
     m_msGroups.clear();
+    m_cmdExportDir = o.value(QStringLiteral("cmd_export_dir")).toString();
+    m_cmdImportDir = o.value(QStringLiteral("cmd_import_dir")).toString();
     QJsonArray grpArr = o.value(QStringLiteral("ms_groups")).toArray();
     if (!grpArr.isEmpty()) {
         m_msGroups = msGroupsFromArray(grpArr);
